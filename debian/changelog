@@ -1,3 +1,9 @@
+libselinux (3.5-1deepin10) unstable; urgency=medium
+
+  * revert "support v25 usec patch" commit, need selinux compatibility patch for usec. avoiding libselinux alone upgrade.
+
+ -- zhouzilong <zhouzilong@uniontech.com>  Fri, 17 Apr 2026 16:27:28 +0800
+
 libselinux (3.5-1deepin9) unstable; urgency=medium
 
   * Same version number as UOS Professional Edition.

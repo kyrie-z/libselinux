@@ -1,0 +1,704 @@
+From c68240dba2b87a0f16f2066bfeb48b18c589d0e7 Mon Sep 17 00:00:00 2001
+From: zhouzilong <zhouzilong@uniontech.com>
+Date: Thu, 5 Dec 2024 20:10:35 +0800
+Subject: [PATCH] selinux and usec configuration separation
+
+---
+ src/load_policy.c      |   5 +-
+ src/load_policy_usec.c |   2 +-
+ src/policy_usec.h      |   9 +-
+ src/selinux_config.c   |  32 +++
+ src/usec_config.c      | 482 +++++++++++++++++++++++++++++++++++++++++
+ src/usec_internal.h    |  13 ++
+ 6 files changed, 537 insertions(+), 6 deletions(-)
+
+diff --git a/src/load_policy.c b/src/load_policy.c
+index f02132e..88841cf 100644
+--- a/src/load_policy.c
++++ b/src/load_policy.c
+@@ -11,6 +11,7 @@
+ #include <string.h>
+ #include <errno.h>
+ #include "selinux_internal.h"
++#include "usec_internal.h"
+ #ifndef ANDROID
+ #include <sepol/sepol.h>
+ #include <sepol/policydb.h>
+@@ -23,8 +24,6 @@
+ #define MNT_DETACH 2
+ #endif
+ 
+-#define SELINUXDEFAULT "default"
+-#define SELINUXDEFAULTPOLICY SELINUXDIR SELINUXDEFAULT "/policy/policy"
+ 
+ extern int (*usec_policyload) (int seqno);
+ extern int usec_init_load_policy(int *enforce);
+@@ -138,7 +137,7 @@ int selinux_mkload_policy(int preservebools __attribute__((unused)))
+ 	       && --vers >= minvers) {
+ 		/* Check prior versions to see if old policy is available */
+ 		snprintf(path, sizeof(path), "%s.%d",
+-			 SELINUXDEFAULTPOLICY, vers);
++			selinux_binary_policy_path() , vers);
+ 		fd = open(path, O_RDONLY | O_CLOEXEC);
+ 	}
+ 	if (fd < 0) {
+diff --git a/src/load_policy_usec.c b/src/load_policy_usec.c
+index 7beffdd..f4001cf 100644
+--- a/src/load_policy_usec.c
++++ b/src/load_policy_usec.c
+@@ -52,7 +52,7 @@ int usec_init_load_policy(int *enforce)
+ 	if (! mntpoint )
+ 		goto noload;
+ 
+-	set_usecmnt(mntpoint);
++	set_usecmnt(mntpoint); //todo: need selinux and usec separation
+ 
+ 	/* If selinux has already been initialized, return directly */
+ 	if (is_selinux_enabled() == 1)
+diff --git a/src/policy_usec.h b/src/policy_usec.h
+index 93aeed0..61432c5 100644
+--- a/src/policy_usec.h
++++ b/src/policy_usec.h
+@@ -8,10 +8,15 @@
+  * xattr name for SELinux attributes.
+  * This may have been exported via Kernel uapi header.
+  */
+-#ifndef XATTR_NAME_USEC
+-#define XATTR_NAME_USEC "security.selinux2"
++#ifndef XATTR_NAME_USEC_FILE
++#define XATTR_NAME_USEC_FILE "security.usec_file"
+ #endif
+ 
++#ifndef XATTR_NAME_USEC_PROC
++#define XATTR_NAME_USEC_PROC "security.usec_proc"
++#endif
++
++
+ /* selinux file system type */
+ #define USECFS "usecfs"
+ 
+diff --git a/src/selinux_config.c b/src/selinux_config.c
+index eab6e11..6befa0f 100644
+--- a/src/selinux_config.c
++++ b/src/selinux_config.c
+@@ -11,6 +11,7 @@
+ #include <errno.h>
+ #include "policy.h"
+ #include "selinux_internal.h"
++#include "usec_internal.h"
+ #include "get_default_type_internal.h"
+ #include <sys/stat.h>
+ 
+@@ -89,6 +90,7 @@ static const uint16_t file_path_suffixes_idx[NEL] = {
+ 
+ int selinux_getenforcemode(int *enforce)
+ {
++
+ 	int ret = -1;
+ 	FILE *cfg = fopen(SELINUXCONFIG, "re");
+ 	if (cfg) {
+@@ -138,6 +140,10 @@ static char *selinux_policytype;
+ 
+ int selinux_getpolicytype(char **type)
+ {
++	if (!is_selinux_enabled() && is_usec_enabled()){
++		return usec_getpolicytype(type);
++	}
++
+ 	__selinux_once(once, init_selinux_config);
+ 	if (!selinux_policytype)
+ 		return -1;
+@@ -271,6 +277,13 @@ static void fini_selinux_policyroot(void)
+ 
+ void selinux_reset_config(void)
+ {
++
++	if (!is_selinux_enabled() && is_usec_enabled()){
++		fini_usec_policyroot();
++		init_usec_config();
++		return;
++	}
++
+ 	fini_selinux_policyroot();
+ 	init_selinux_config();
+ }
+@@ -278,6 +291,11 @@ void selinux_reset_config(void)
+ 
+ static const char *get_path(int idx)
+ {
++	if (!is_selinux_enabled() && is_usec_enabled()){
++		__selinux_once(once, init_usec_config);
++		return  usec_file_paths[idx];
++	}
++
+ 	__selinux_once(once, init_selinux_config);
+ 	return file_paths[idx];
+ }
+@@ -290,12 +308,19 @@ const char *selinux_default_type_path(void)
+ 
+ const char *selinux_policy_root(void)
+ {
++	if (!is_selinux_enabled() && is_usec_enabled()){
++		return usec_policy_root();
++	}
+ 	__selinux_once(once, init_selinux_config);
+ 	return selinux_policyroot;
+ }
+ 
+ int selinux_set_policy_root(const char *path)
+ {
++	if (!is_selinux_enabled() && is_usec_enabled()){
++		return usec_set_policy_root(path);
++	}
++
+ 	int i;
+ 	char *policy_type = strrchr(path, '/');
+ 	if (!policy_type) {
+@@ -326,6 +351,9 @@ int selinux_set_policy_root(const char *path)
+ 
+ const char *selinux_path(void)
+ {
++	if (!is_selinux_enabled() && is_usec_enabled()){
++		return usec_path();
++	}
+ 	return selinux_rootpath;
+ }
+ 
+@@ -362,6 +390,10 @@ const char *selinux_binary_policy_path(void)
+ 
+ const char *selinux_current_policy_path(void)
+ {
++	if (!is_selinux_enabled() && is_usec_enabled()){
++		return usec_current_policy_path();
++	}
++
+ 	int rc = 0;
+ 	int vers = 0;
+ 	static char policy_path[PATH_MAX];
+diff --git a/src/usec_config.c b/src/usec_config.c
+index 51df51d..60fa4ce 100644
+--- a/src/usec_config.c
++++ b/src/usec_config.c
+@@ -7,9 +7,84 @@
+ #include <stdlib.h>
+ #include <limits.h>
+ #include <unistd.h>
++#include <errno.h>
++#include <sys/stat.h>
+ #include "usec_internal.h"
++#include "selinux_internal.h"
++#include "policy_usec.h"
+ 
++#define USECLINUXDEFAULT "usec"
+ #define USECLINUXTAG "USECLINUX="
++#define USECLINUXTYPETAG "USECLINUXTYPE="
++#define REQUIRESEUSERS "REQUIRESEUSERS="
++
++/* Indices for file paths arrays. */
++#define BINPOLICY         0
++#define CONTEXTS_DIR      1
++#define FILE_CONTEXTS     2
++#define HOMEDIR_CONTEXTS  3
++#define DEFAULT_CONTEXTS  4
++#define USER_CONTEXTS     5
++#define FAILSAFE_CONTEXT  6
++#define DEFAULT_TYPE      7
++/* BOOLEANS is deprecated */
++#define BOOLEANS          8
++#define MEDIA_CONTEXTS    9
++#define REMOVABLE_CONTEXT 10
++#define CUSTOMIZABLE_TYPES    11
++/* USERS_DIR is deprecated */
++#define USERS_DIR         12
++#define SEUSERS           13
++#define TRANSLATIONS      14
++#define NETFILTER_CONTEXTS    15
++#define FILE_CONTEXTS_HOMEDIR 16
++#define FILE_CONTEXTS_LOCAL 17
++#define SECURETTY_TYPES   18
++#define X_CONTEXTS        19
++#define COLORS            20
++#define VIRTUAL_DOMAIN    21
++#define VIRTUAL_IMAGE     22
++#define FILE_CONTEXT_SUBS 23
++#define SEPGSQL_CONTEXTS  24
++#define FILE_CONTEXT_SUBS_DIST 25
++#define LXC_CONTEXTS      26
++#define BOOLEAN_SUBS      27
++#define OPENSSH_CONTEXTS  28
++#define SYSTEMD_CONTEXTS  29
++#define SNAPPERD_CONTEXTS 30
++#define OPENRC_CONTEXTS   31
++#define NEL               32
++
++/* Part of one-time lazy init */
++static pthread_once_t once = PTHREAD_ONCE_INIT;
++void init_usec_config(void);
++
++/* New layout is relative to SELINUXDIR/policytype. */
++char *usec_file_paths[NEL];
++#define L1(l) L2(l)
++#define L2(l)str##l
++static const union file_path_suffixes_data {
++	struct {
++#define S_(n, s) char L1(__LINE__)[sizeof(s)];
++#include "file_path_suffixes.h"
++#undef S_
++	};
++	char str[0];
++} file_path_suffixes_data = {
++	{
++#define S_(n, s) s,
++#include "file_path_suffixes.h"
++#undef S_
++	}
++};
++static const uint16_t file_path_suffixes_idx[NEL] = {
++#define S_(n, s) [n] = offsetof(union file_path_suffixes_data, L1(__LINE__)),
++#include "file_path_suffixes.h"
++#undef S_
++};
++
++#undef L1
++#undef L2
+ 
+ int usec_getenforcemode(int *enforce)
+ {
+@@ -53,3 +128,410 @@ int usec_getenforcemode(int *enforce)
+ 	return ret;
+ }
+ 
++
++
++
++static char *usec_policytype;
++
++int usec_getpolicytype(char **type)
++{
++	__selinux_once(once, init_usec_config);
++	if (!usec_policytype)
++		return -1;
++	*type = strdup(usec_policytype);
++	return *type ? 0 : -1;
++}
++
++
++static int setpolicytype(const char *type)
++{
++	free(usec_policytype);
++	usec_policytype = strdup(type);
++	return usec_policytype ? 0 : -1;
++}
++
++static char *usec_policyroot = NULL;
++static const char *usec_rootpath = SELINUXDIR;
++
++
++void init_usec_config(void)
++{
++	int i, *intptr;
++	size_t line_len;
++	ssize_t len;
++	char *line_buf = NULL, *buf_p, *value, *type = NULL, *end;
++	FILE *fp;
++	struct stat buf_stat;
++
++	if (usec_policyroot)
++		return;
++
++	fp = fopen(USECLINUXCONFIG, "re");
++	if (fp) {
++		__fsetlocking(fp, FSETLOCKING_BYCALLER);
++		while ((len = getline(&line_buf, &line_len, fp)) > 0) {
++			if (line_buf[len - 1] == '\n')
++				line_buf[len - 1] = 0;
++			buf_p = line_buf;
++			while (isspace(*buf_p))
++				buf_p++;
++			if (*buf_p == '#' || *buf_p == 0)
++				continue;
++
++			if (!strncasecmp(buf_p, USECLINUXTYPETAG,
++					 sizeof(USECLINUXTYPETAG) - 1)) {
++				buf_p += sizeof(USECLINUXTYPETAG) - 1;
++				while (isspace(*buf_p))
++					buf_p++;
++				type = strdup(buf_p);
++				if (!type) {
++					free(line_buf);
++					fclose(fp);
++					return;
++				}
++				end = type + strlen(type) - 1;
++				while ((end > type) &&
++				       (isspace(*end) || iscntrl(*end))) {
++					*end = 0;
++					end--;
++				}
++				if (setpolicytype(type) != 0) {
++					free(type);
++					free(line_buf);
++					fclose(fp);
++					return;
++				}
++				free(type);
++				continue;
++			} else if (!strncmp(buf_p, REQUIRESEUSERS,
++					    sizeof(REQUIRESEUSERS) - 1)) {
++				value = buf_p + sizeof(REQUIRESEUSERS) - 1;
++				while (isspace(*value))
++					value++;
++				intptr = &require_seusers;
++			} else {
++				continue;
++			}
++
++			if (isdigit(*value))
++				*intptr = atoi(value);
++			else if (strncasecmp(value, "true", sizeof("true") - 1))
++				*intptr = 1;
++			else if (strncasecmp
++				 (value, "false", sizeof("false") - 1))
++				*intptr = 0;
++		}
++		free(line_buf);
++		fclose(fp);
++	}
++
++update_type:
++	if (!usec_policytype && setpolicytype(USECLINUXDEFAULT) != 0)
++		return;
++
++	if (asprintf(&usec_policyroot, "%s%s", SELINUXDIR, usec_policytype) == -1)
++		return;
++
++	if (!((stat(usec_policyroot, &buf_stat) == 0) &&
++			S_ISDIR(buf_stat.st_mode))) {
++		if (strcmp(usec_policytype, USECLINUXDEFAULT)) {
++			free(usec_policyroot);
++			usec_policyroot = NULL;
++			free(usec_policytype);
++			usec_policytype = type = NULL;
++			goto update_type;
++		}
++	}
++
++	for (i = 0; i < NEL; i++)
++		if (asprintf(&usec_file_paths[i], "%s%s",
++			     usec_policyroot,
++			     file_path_suffixes_data.str +
++			     file_path_suffixes_idx[i])
++		    == -1)
++			return;
++}
++
++void fini_usec_policyroot(void) __attribute__ ((destructor));
++
++void fini_usec_policyroot(void)
++{
++	int i;
++	free(usec_policyroot);
++	usec_policyroot = NULL;
++	for (i = 0; i < NEL; i++) {
++		free(usec_file_paths[i]);
++		usec_file_paths[i] = NULL;
++	}
++	free(usec_policytype);
++	usec_policytype = NULL;
++}
++
++void usec_reset_config(void)
++{
++	fini_usec_policyroot();
++	init_usec_config();
++}
++
++
++static const char *get_path(int idx)
++{
++	__selinux_once(once, init_usec_config);
++	return usec_file_paths[idx];
++}
++
++const char *usec_default_type_path(void)
++{
++	return get_path(DEFAULT_TYPE);
++}
++
++
++const char *usec_policy_root(void)
++{
++	__selinux_once(once, init_usec_config);
++	return usec_policyroot;
++}
++
++int usec_set_policy_root(const char *path)
++{
++	int i;
++	char *policy_type = strrchr(path, '/');
++	if (!policy_type) {
++		errno = EINVAL;
++		return -1;
++	}
++	policy_type++;
++
++	fini_usec_policyroot();
++
++	usec_policyroot = strdup(path);
++	if (! usec_policyroot)
++		return -1;
++
++	if (setpolicytype(policy_type) != 0)
++		return -1;
++
++	for (i = 0; i < NEL; i++)
++		if (asprintf(&usec_file_paths[i], "%s%s",
++			     usec_policyroot,
++			     file_path_suffixes_data.str +
++			     file_path_suffixes_idx[i])
++		    == -1)
++			return -1;
++
++	return 0;
++}
++
++const char *usec_path(void)
++{
++	return usec_rootpath;
++}
++
++
++const char *usec_default_context_path(void)
++{
++	return get_path(DEFAULT_CONTEXTS);
++}
++
++
++const char *usec_securetty_types_path(void)
++{
++	return get_path(SECURETTY_TYPES);
++}
++
++
++const char *usec_failsafe_context_path(void)
++{
++	return get_path(FAILSAFE_CONTEXT);
++}
++
++
++const char *usec_removable_context_path(void)
++{
++	return get_path(REMOVABLE_CONTEXT);
++}
++
++
++const char *usec_binary_policy_path(void)
++{
++	return get_path(BINPOLICY);
++}
++
++
++const char *usec_current_policy_path(void)
++{
++	int rc = 0;
++	int vers = 0;
++	static char policy_path[PATH_MAX];
++
++	if (usec_mnt) {
++		snprintf(policy_path, sizeof(policy_path), "%s/policy", usec_mnt);
++		if (access(policy_path, F_OK) == 0 ) {
++			return policy_path;
++		}
++	}
++	vers = security_policyvers();
++	do {
++		/* Check prior versions to see if old policy is available */
++		snprintf(policy_path, sizeof(policy_path), "%s.%d",
++			 usec_binary_policy_path(), vers);
++	} while ((rc = access(policy_path, F_OK)) && --vers > 0);
++
++	if (rc) return NULL;
++	return policy_path;
++}
++
++
++const char *usec_file_context_path(void)
++{
++	return get_path(FILE_CONTEXTS);
++}
++
++
++const char *usec_homedir_context_path(void)
++{
++	return get_path(HOMEDIR_CONTEXTS);
++}
++
++
++const char *usec_media_context_path(void)
++{
++	return get_path(MEDIA_CONTEXTS);
++}
++
++
++const char *usec_customizable_types_path(void)
++{
++	return get_path(CUSTOMIZABLE_TYPES);
++}
++
++
++const char *usec_contexts_path(void)
++{
++	return get_path(CONTEXTS_DIR);
++}
++
++const char *usec_user_contexts_path(void)
++{
++	return get_path(USER_CONTEXTS);
++}
++
++
++/* Deprecated as local policy booleans no longer supported. */
++const char *usec_booleans_path(void)
++{
++	return get_path(BOOLEANS);
++}
++
++
++/* Deprecated as no longer supported. */
++const char *usec_users_path(void)
++{
++	return get_path(USERS_DIR);
++}
++
++
++const char *usec_usersconf_path(void)
++{
++	return get_path(SEUSERS);
++}
++
++
++const char *usec_translations_path(void)
++{
++	return get_path(TRANSLATIONS);
++}
++
++
++const char *usec_colors_path(void)
++{
++	return get_path(COLORS);
++}
++
++
++const char *usec_netfilter_context_path(void)
++{
++	return get_path(NETFILTER_CONTEXTS);
++}
++
++
++const char *usec_file_context_homedir_path(void)
++{
++	return get_path(FILE_CONTEXTS_HOMEDIR);
++}
++
++
++const char *usec_file_context_local_path(void)
++{
++	return get_path(FILE_CONTEXTS_LOCAL);
++}
++
++
++const char *usec_x_context_path(void)
++{
++	return get_path(X_CONTEXTS);
++}
++
++
++const char *usec_virtual_domain_context_path(void)
++{
++	return get_path(VIRTUAL_DOMAIN);
++}
++
++
++const char *usec_virtual_image_context_path(void)
++{
++	return get_path(VIRTUAL_IMAGE);
++}
++
++
++const char *usec_lxc_contexts_path(void)
++{
++	return get_path(LXC_CONTEXTS);
++}
++
++
++const char *usec_openrc_contexts_path(void)
++{
++    return get_path(OPENRC_CONTEXTS);
++}
++
++
++const char *usec_openssh_contexts_path(void)
++{
++    return get_path(OPENSSH_CONTEXTS);
++}
++
++
++const char *usec_snapperd_contexts_path(void)
++{
++    return get_path(SNAPPERD_CONTEXTS);
++}
++
++
++const char *usec_systemd_contexts_path(void)
++{
++	return get_path(SYSTEMD_CONTEXTS);
++}
++
++
++const char *usec_booleans_subs_path(void) {
++	return get_path(BOOLEAN_SUBS);
++}
++
++
++const char *usec_file_context_subs_path(void) {
++	return get_path(FILE_CONTEXT_SUBS);
++}
++
++
++const char *usec_file_context_subs_dist_path(void) {
++	return get_path(FILE_CONTEXT_SUBS_DIST);
++}
++
++
++const char *usec_sepgsql_context_path(void)
++{
++	return get_path(SEPGSQL_CONTEXTS);
++}
++
+diff --git a/src/usec_internal.h b/src/usec_internal.h
+index b8a2589..314fb69 100644
+--- a/src/usec_internal.h
++++ b/src/usec_internal.h
+@@ -3,5 +3,18 @@
+ 
+ 
+ #define USECLINUXCONFIG SELINUXDIR "usecconfig"
++#define NEL               32
+ 
+ extern int has_usec_config;
++extern char *usec_file_paths[NEL];
++
++extern int usec_getenforcemode(int *enforce);
++extern void init_usec_config(void);
++extern void usec_reset_config(void);
++extern const char *usec_binary_policy_path(void);
++extern int usec_getpolicytype(char **type);
++extern int usec_set_policy_root(const char *path);
++extern const char *usec_path(void);
++extern const char *usec_current_policy_path(void);
++extern void fini_usec_policyroot(void);
++extern const char *usec_policy_root(void);
+\ No newline at end of file
+-- 
+2.20.1
+

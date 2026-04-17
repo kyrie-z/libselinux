@@ -1,1 +1,2 @@
-0001-fix-swig_python_appendoutput-compilation-argument-er.patch
+support-v25-usec.patch
+selinux-and-usec-configuration-separation.patch

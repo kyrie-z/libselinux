@@ -1,0 +1,3265 @@
+From 2886960a8de2e055a4839e6a803c736d5effe96a Mon Sep 17 00:00:00 2001
+From: zhouzilong <zhouzilong@uniontech.com>
+Date: Wed, 4 Sep 2024 09:45:48 +0800
+Subject: [PATCH] v25 usec
+
+---
+ include/selinux/avc.h     |    1 +
+ include/selinux/selinux.h |    8 +
+ include/selinux/uavc.h    |  472 +++++++++++++++
+ include/selinux/usec.h    |   59 ++
+ src/callbacks.c           |   14 +
+ src/checkAccess.c         |    2 +-
+ src/checkAccess_usec.c    |   78 +++
+ src/enabled.c             |   11 +-
+ src/enabled_usec.c        |   28 +
+ src/file_audit_status.c   |   80 +++
+ src/get_context_list.c    |    4 +
+ src/init.c                |    7 +-
+ src/init_usec.c           |  157 +++++
+ src/libselinux.map        |   34 ++
+ src/load_policy.c         |   11 +-
+ src/load_policy_usec.c    |   81 +++
+ src/policy_usec.h         |   27 +
+ src/selinux_config.c      |   16 +-
+ src/selinux_restorecon.c  |   29 +-
+ src/uavc.c                | 1173 +++++++++++++++++++++++++++++++++++++
+ src/uavc_internal.c       |  293 +++++++++
+ src/uavc_internal.h       |  176 ++++++
+ src/usec_config.c         |   55 ++
+ src/usec_internal.h       |    7 +
+ src/usec_netlink.h        |   51 ++
+ utils/getfileaudit.c      |   46 ++
+ 26 files changed, 2913 insertions(+), 7 deletions(-)
+ create mode 100644 include/selinux/uavc.h
+ create mode 100644 include/selinux/usec.h
+ create mode 100644 src/checkAccess_usec.c
+ create mode 100644 src/enabled_usec.c
+ create mode 100644 src/file_audit_status.c
+ create mode 100644 src/init_usec.c
+ create mode 100644 src/load_policy_usec.c
+ create mode 100644 src/policy_usec.h
+ create mode 100644 src/uavc.c
+ create mode 100644 src/uavc_internal.c
+ create mode 100644 src/uavc_internal.h
+ create mode 100644 src/usec_config.c
+ create mode 100644 src/usec_internal.h
+ create mode 100644 src/usec_netlink.h
+ create mode 100644 utils/getfileaudit.c
+
+diff --git a/include/selinux/avc.h b/include/selinux/avc.h
+index 4bbd238..7f370b6 100644
+--- a/include/selinux/avc.h
++++ b/include/selinux/avc.h
+@@ -517,6 +517,7 @@ extern int selinux_status_policyload(void);
+  */
+ extern int selinux_status_deny_unknown(void);
+ 
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/include/selinux/selinux.h b/include/selinux/selinux.h
+index a094885..6c52cfd 100644
+--- a/include/selinux/selinux.h
++++ b/include/selinux/selinux.h
+@@ -741,6 +741,14 @@ extern int selinux_lsetfilecon_default(const char *path);
+  */
+ extern void selinux_reset_config(void);
+ 
++/* Get file audit status. */
++extern int get_file_audit_status(const char *file_path);
++
++/* Write audit log */
++extern int write_audit_log(const char *log);
++
++extern int is_selinux_enabled_raw(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/include/selinux/uavc.h b/include/selinux/uavc.h
+new file mode 100644
+index 0000000..8e27d49
+--- /dev/null
++++ b/include/selinux/uavc.h
+@@ -0,0 +1,472 @@
++/*
++ * Access vector cache interface for object managers.
++ *
++ * Author : Eamon Walsh <ewalsh@epoch.ncsc.mil>
++ */
++#ifndef _SELINUX_UAVC_H_
++#define _SELINUX_UAVC_H_
++
++#include <stdint.h>
++#include <errno.h>
++#include <stdlib.h>
++#include <selinux/selinux.h>
++#include <selinux/usec.h>
++#include <selinux/avc.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++
++
++#define SECSID_WILD (security_id_t)NULL	/* unspecified SID */
++
++/**
++ * uavc_sid_to_context - get copy of context corresponding to SID.
++ * @sid: input SID
++ * @ctx: pointer to context reference
++ *
++ * Return a copy of the security context corresponding to the input
++ * @sid in the memory referenced by @ctx.  The caller is expected to 
++ * free the context with freecon().  Return %0 on success, -%1 on
++ * failure, with @errno set to %ENOMEM if insufficient memory was
++ * available to make the copy, or %EINVAL if the input SID is invalid.
++ */
++int uavc_sid_to_context(security_id_t sid, char ** ctx);
++int uavc_sid_to_context_raw(security_id_t sid, char ** ctx);
++
++/**
++ * uavc_context_to_sid - get SID for context.
++ * @ctx: input security context
++ * @sid: pointer to SID reference
++ *
++ * Look up security context @ctx in SID table, making
++ * a new entry if @ctx is not found.  Increment the
++ * reference counter for the SID.  Store a pointer
++ * to the SID structure into the memory referenced by @sid, 
++ * returning %0 on success or -%1 on error with @errno set.  
++ */
++int uavc_context_to_sid(const char * ctx, security_id_t * sid);
++int uavc_context_to_sid_raw(const char * ctx, security_id_t * sid);
++
++#if 0
++/**
++ * sidget - increment SID reference counter.
++ * @sid: SID reference
++ *
++ * Increment the reference counter for @sid, indicating that
++ * @sid is in use by an (additional) object.  Return the
++ * new reference count, or zero if @sid is invalid (has zero
++ * reference count).  Note that uavc_context_to_sid() also
++ * increments reference counts.
++ */
++int sidget(security_id_t sid);
++
++/**
++ * sidput - decrement SID reference counter.
++ * @sid: SID reference
++ *
++ * Decrement the reference counter for @sid, indicating that
++ * a reference to @sid is no longer in use.  Return the 
++ * new reference count.  When the reference count reaches
++ * zero, the SID is invalid, and uavc_context_to_sid() must
++ * be called to obtain a new SID for the security context.
++ */
++int sidput(security_id_t sid);
++#endif
++/**
++ * uavc_get_initial_sid - get SID for an initial kernel security identifier
++ * @name: input name of initial kernel security identifier
++ * @sid: pointer to a SID reference
++ *
++ * Get the context for an initial kernel security identifier specified by 
++ * @name using security_get_initial_context() and then call 
++ * uavc_context_to_sid() to get the corresponding SID.
++ */
++int uavc_get_initial_sid(const char *name, security_id_t * sid);
++
++/*
++ * UAVC entry
++ */
++struct uavc_entry;
++struct uavc_entry_ref {
++	struct uavc_entry *ae;
++};
++
++/**
++ * uavc_entry_ref_init - initialize an UAVC entry reference.
++ * @aeref: pointer to uavc entry reference structure
++ *
++ * Use this macro to initialize an uavc entry reference structure
++ * before first use.  These structures are passed to uavc_has_perm(),
++ * which stores cache entry references in them.  They can increase
++ * performance on repeated queries.
++ */
++#define uavc_entry_ref_init(aeref) ((aeref)->ae = NULL)
++
++/*
++ * User-provided callbacks for memory, auditing, and locking
++ */
++
++/* These structures are passed by reference to uavc_init().  Passing
++ * a NULL reference will cause the UAVC to use a default.  The default
++ * memory callbacks are malloc() and free().  The default logging method
++ * is to print on stderr.  If no thread callbacks are passed, a separate
++ * listening thread won't be started for kernel policy change messages.
++ * If no locking callbacks are passed, no locking will take place.
++ */
++struct uavc_memory_callback {
++	/* malloc() equivalent. */
++	void *(*func_malloc) (size_t size);
++	/* free() equivalent. */
++	void (*func_free) (void *ptr);
++	/* Note that these functions should set errno on failure.
++	   If not, some uavc routines may return -1 without errno set. */
++};
++
++struct uavc_log_callback {
++	/* log the printf-style format and arguments. */
++	void
++#ifdef __GNUC__
++__attribute__ ((format(printf, 1, 2)))
++#endif
++	(*func_log) (const char *fmt, ...);
++	/* store a string representation of auditdata (corresponding
++	   to the given security class) into msgbuf. */
++	void (*func_audit) (void *auditdata, security_class_t cls,
++			    char *msgbuf, size_t msgbufsize);
++};
++
++struct uavc_thread_callback {
++	/* create and start a thread, returning an opaque pointer to it; 
++	   the thread should run the given function. */
++	void *(*func_create_thread) (void (*run) (void));
++	/* cancel a given thread and free its resources. */
++	void (*func_stop_thread) (void *thread);
++};
++
++struct uavc_lock_callback {
++	/* create a lock and return an opaque pointer to it. */
++	void *(*func_alloc_lock) (void);
++	/* obtain a given lock, blocking if necessary. */
++	void (*func_get_lock) (void *lock);
++	/* release a given lock. */
++	void (*func_release_lock) (void *lock);
++	/* destroy a given lock (free memory, etc.) */
++	void (*func_free_lock) (void *lock);
++};
++
++/*
++ * Available options
++ */
++
++/* no-op option, useful for unused slots in an array of options */
++#define UAVC_OPT_UNUSED		0
++/* override kernel enforcing mode (boolean value) */
++#define UAVC_OPT_SETENFORCE	1
++
++/*
++ * UAVC operations
++ */
++
++/**
++ * uavc_init - Initialize the UAVC.
++ * @msgprefix: prefix for log messages
++ * @mem_callbacks: user-supplied memory callbacks
++ * @log_callbacks: user-supplied logging callbacks
++ * @thread_callbacks: user-supplied threading callbacks
++ * @lock_callbacks: user-supplied locking callbacks
++ *
++ * Initialize the access vector cache.  Return %0 on
++ * success or -%1 with @errno set on failure.  
++ * If @msgprefix is NULL, use "uuavc".  If any callback 
++ * structure references are NULL, use default methods 
++ * for those callbacks (see the definition of the callback
++ * structures above).
++ */
++int uavc_init(const char *msgprefix,
++	     const struct uavc_memory_callback *mem_callbacks,
++	     const struct uavc_log_callback *log_callbacks,
++	     const struct uavc_thread_callback *thread_callbacks,
++	     const struct uavc_lock_callback *lock_callbacks);
++
++/**
++ * uavc_open - Initialize the UUAVC.
++ * @opts: array of selabel_opt structures specifying UAVC options or NULL.
++ * @nopts: number of elements in opts array or zero for no options.
++ *
++ * This function is identical to uavc_init(), except the message prefix
++ * is set to "uavc" and any callbacks desired should be specified via
++ * selinux_set_callback().  Available options are listed above.
++ */
++int uavc_open(struct selinux_opt *opts, unsigned nopts);
++
++/**
++ * uavc_cleanup - Remove unused SIDs and UAVC entries.
++ *
++ * Search the SID table for SID structures with zero
++ * reference counts, and remove them along with all
++ * UAVC entries that reference them.  This can be used
++ * to return memory to the system.
++ */
++void uavc_cleanup(void);
++
++/**
++ * uavc_reset - Flush the cache and reset statistics.
++ *
++ * Remove all entries from the cache and reset all access
++ * statistics (as returned by uavc_cache_stats()) to zero.
++ * The SID mapping is not affected.  Return %0 on success, 
++ * -%1 with @errno set on error.
++ */
++int uavc_reset(void);
++
++/**
++ * uavc_destroy - Free all UAVC structures.
++ *
++ * Destroy all UAVC structures and free all allocated
++ * memory.  User-supplied locking, memory, and audit
++ * callbacks will be retained, but security-event
++ * callbacks will not.  All SID's will be invalidated.
++ * User must call uavc_init() if further use of UAVC is desired.
++ */
++void uavc_destroy(void);
++
++/**
++ * uavc_has_perm_noaudit - Check permissions but perform no auditing.
++ * @ssid: source security identifier
++ * @tsid: target security identifier
++ * @tclass: target security class
++ * @requested: requested permissions, interpreted based on @tclass
++ * @aeref:  UAVC entry reference
++ * @avd: access vector decisions
++ *
++ * Check the UAVC to determine whether the @requested permissions are granted
++ * for the SID pair (@ssid, @tsid), interpreting the permissions
++ * based on @tclass, and call the security server on a cache miss to obtain
++ * a new decision and add it to the cache.  Update @aeref to refer to an UAVC
++ * entry with the resulting decisions, and return a copy of the decisions
++ * in @avd.  Return %0 if all @requested permissions are granted, -%1 with
++ * @errno set to %EACCES if any permissions are denied, or to another value
++ * upon other errors.  This function is typically called by uavc_has_perm(),
++ * but may also be called directly to separate permission checking from
++ * auditing, e.g. in cases where a lock must be held for the check but
++ * should be released for the auditing.
++ */
++int uavc_has_perm_noaudit(security_id_t ssid,
++			 security_id_t tsid,
++			 security_class_t tclass,
++			 access_vector_t requested,
++			 struct uavc_entry_ref *aeref, struct av_decision *avd);
++
++/**
++ * uavc_has_perm - Check permissions and perform any appropriate auditing.
++ * @ssid: source security identifier
++ * @tsid: target security identifier
++ * @tclass: target security class
++ * @requested: requested permissions, interpreted based on @tclass
++ * @aeref:  UAVC entry reference
++ * @auditdata: auxiliary audit data
++ *
++ * Check the UAVC to determine whether the @requested permissions are granted
++ * for the SID pair (@ssid, @tsid), interpreting the permissions
++ * based on @tclass, and call the security server on a cache miss to obtain
++ * a new decision and add it to the cache.  Update @aeref to refer to an UAVC
++ * entry with the resulting decisions.  Audit the granting or denial of
++ * permissions in accordance with the policy.  Return %0 if all @requested
++ * permissions are granted, -%1 with @errno set to %EACCES if any permissions
++ * are denied or to another value upon other errors.
++ */
++int uavc_has_perm(security_id_t ssid, security_id_t tsid,
++		 security_class_t tclass, access_vector_t requested,
++		 struct uavc_entry_ref *aeref, void *auditdata);
++
++/**
++ * uavc_audit - Audit the granting or denial of permissions.
++ * @ssid: source security identifier
++ * @tsid: target security identifier
++ * @tclass: target security class
++ * @requested: requested permissions
++ * @avd: access vector decisions
++ * @result: result from uavc_has_perm_noaudit
++ * @auditdata:  auxiliary audit data
++ *
++ * Audit the granting or denial of permissions in accordance
++ * with the policy.  This function is typically called by
++ * uavc_has_perm() after a permission check, but can also be
++ * called directly by callers who use uavc_has_perm_noaudit()
++ * in order to separate the permission check from the auditing.
++ * For example, this separation is useful when the permission check must
++ * be performed under a lock, to allow the lock to be released
++ * before calling the auditing code.
++ */
++void uavc_audit(security_id_t ssid, security_id_t tsid,
++	       security_class_t tclass, access_vector_t requested,
++	       struct av_decision *avd, int result, void *auditdata);
++
++/**
++ * uavc_compute_create - Compute SID for labeling a new object.
++ * @ssid: source security identifier
++ * @tsid: target security identifier
++ * @tclass: target security class
++ * @newsid: pointer to SID reference
++ *
++ * Call the security server to obtain a context for labeling a
++ * new object.  Look up the context in the SID table, making
++ * a new entry if not found.  Increment the reference counter
++ * for the SID.  Store a pointer to the SID structure into the
++ * memory referenced by @newsid, returning %0 on success or -%1 on
++ * error with @errno set.  
++ */
++int uavc_compute_create(security_id_t ssid,
++		       security_id_t tsid,
++		       security_class_t tclass, security_id_t * newsid);
++
++/**
++ * uavc_compute_member - Compute SID for polyinstantation.
++ * @ssid: source security identifier
++ * @tsid: target security identifier
++ * @tclass: target security class
++ * @newsid: pointer to SID reference
++ *
++ * Call the security server to obtain a context for labeling an
++ * object instance.  Look up the context in the SID table, making
++ * a new entry if not found.  Increment the reference counter
++ * for the SID.  Store a pointer to the SID structure into the
++ * memory referenced by @newsid, returning %0 on success or -%1 on
++ * error with @errno set.  
++ */
++int uavc_compute_member(security_id_t ssid,
++		       security_id_t tsid,
++		       security_class_t tclass, security_id_t * newsid);
++
++/* 
++ * security event callback facility
++ */
++
++/* security events */
++#define UAVC_CALLBACK_GRANT		1
++#define UAVC_CALLBACK_TRY_REVOKE		2
++#define UAVC_CALLBACK_REVOKE		4
++#define UAVC_CALLBACK_RESET		8
++#define UAVC_CALLBACK_AUDITALLOW_ENABLE	16
++#define UAVC_CALLBACK_AUDITALLOW_DISABLE	32
++#define UAVC_CALLBACK_AUDITDENY_ENABLE	64
++#define UAVC_CALLBACK_AUDITDENY_DISABLE	128
++
++/**
++ * uavc_add_callback - Register a callback for security events.
++ * @callback: callback function
++ * @events: bitwise OR of desired security events
++ * @ssid: source security identifier or %SECSID_WILD
++ * @tsid: target security identifier or %SECSID_WILD
++ * @tclass: target security class
++ * @perms: permissions
++ *
++ * Register a callback function for events in the set @events
++ * related to the SID pair (@ssid, @tsid) and
++ * and the permissions @perms, interpreting
++ * @perms based on @tclass.  Returns %0 on success or
++ * -%1 if insufficient memory exists to add the callback.
++ */
++int uavc_add_callback(int (*callback)
++		      (uint32_t event, security_id_t ssid,
++		       security_id_t tsid, security_class_t tclass,
++		       access_vector_t perms,
++		       access_vector_t * out_retained),
++		     uint32_t events, security_id_t ssid,
++		     security_id_t tsid, security_class_t tclass,
++		     access_vector_t perms);
++
++/*
++ * UAVC statistics 
++ */
++
++/* If set, cache statistics are tracked.  This may
++ * become a compile-time option in the future.
++ */
++#define UAVC_CACHE_STATS     1
++
++struct uavc_cache_stats {
++	unsigned entry_lookups;
++	unsigned entry_hits;
++	unsigned entry_misses;
++	unsigned entry_discards;
++	unsigned cav_lookups;
++	unsigned cav_hits;
++	unsigned cav_probes;
++	unsigned cav_misses;
++};
++
++/**
++ * uavc_cache_stats - get cache access statistics.
++ * @stats: reference to statistics structure
++ *
++ * Fill the supplied structure with information about UAVC 
++ * activity since the last call to uavc_init() or
++ * uavc_reset().  See the structure definition for
++ * details.
++ */
++void uavc_cache_stats(struct uavc_cache_stats *stats);
++
++/**
++ * uavc_av_stats - log av table statistics.
++ *
++ * Log a message with information about the size and
++ * distribution of the access vector table.  The audit
++ * callback is used to print the message.
++ */
++void uavc_av_stats(void);
++
++/**
++ * uavc_sid_stats - log SID table statistics.
++ *
++ * Log a message with information about the size and
++ * distribution of the SID table.  The audit callback
++ * is used to print the message.
++ */
++void uavc_sid_stats(void);
++
++/**
++ * uavc_netlink_open - Create a netlink socket and connect to the kernel.
++ */
++int uavc_netlink_open(int blocking);
++
++/**
++ * uavc_netlink_loop - Wait for netlink messages from the kernel
++ */
++void uavc_netlink_loop(void);
++
++/**
++ * uavc_netlink_close - Close the netlink socket
++ */
++void uavc_netlink_close(void);
++
++/**
++ * uavc_netlink_acquire_fd - Acquire netlink socket fd.
++ *
++ * Allows the application to manage messages from the netlink socket in
++ * its own main loop.
++ */
++int uavc_netlink_acquire_fd(void);
++
++/**
++ * uavc_netlink_release_fd - Release netlink socket fd.
++ *
++ * Returns ownership of the netlink socket to the library.
++ */
++void uavc_netlink_release_fd(void);
++
++/**
++ * uavc_netlink_check_nb - Check netlink socket for new messages.
++ *
++ * Called by the application when using uavc_netlink_acquire_fd() to
++ * process kernel netlink events.
++ */
++int uavc_netlink_check_nb(void);
++
++
++#ifdef __cplusplus
++}
++#endif
++#endif				/* _SELINUX_UAVC_H_ */
+diff --git a/include/selinux/usec.h b/include/selinux/usec.h
+new file mode 100644
+index 0000000..d66cade
+--- /dev/null
++++ b/include/selinux/usec.h
+@@ -0,0 +1,59 @@
++#ifndef _USEC_H_
++#define _USEC_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++
++
++#define USEC_CB_LOG		0
++#define USEC_CB_AUDIT	1
++#define USEC_CB_VALIDATE	2
++#define USEC_CB_SETENFORCE	3
++#define USEC_CB_POLICYLOAD	4
++
++/* Function about usec */
++extern int is_usec_enabled_raw(void);
++extern int is_usec_enabled(void);
++void set_usecmnt(const char *mnt);
++int usecfs_exists(void);
++void fini_usecmnt(void);
++
++extern int usec_getenforcemode(int *enforce);
++
++	/* Logging type codes, passed to the logging callback */
++#define USEC_ERROR	        0
++#define USEC_WARNING		1
++#define USEC_INFO		2
++#define USEC_UAVC		3
++#define USEC_TRANS_DIR	"/var/run/setrans"
++
++
++/* Definitions of av_decision.flags */
++#define USEC_AVD_FLAGS_PERMISSIVE	0x0001
++
++/**
++ * usec_check_access - Check permissions and perform appropriate auditing.
++ * @scon: source security context
++ * @tcon: target security context
++ * @tclass: target security class string
++ * @perm: requested permissions string, interpreted based on @tclass
++ * @auditdata: auxiliary audit data
++ *
++ * Check the AVC to determine whether the @perm permissions are granted
++ * for the SID pair (@scon, @tcon), interpreting the permissions
++ * based on @tclass.
++ * Return %0 if all @perm permissions are granted, -%1 with 
++ * @errno set to %EACCES if any permissions are denied or to another 
++ * value upon other errors.
++ * If auditing or logging is configured the appropriate callbacks will be called
++ * and passed the auditdata field
++ */
++extern int usec_check_access(const char * scon, const char * tcon, const char *tclass, const char *perm, void *auditdata);
++
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/src/callbacks.c b/src/callbacks.c
+index 469c405..409bc0b 100644
+--- a/src/callbacks.c
++++ b/src/callbacks.c
+@@ -77,6 +77,14 @@ int
+ (*selinux_netlink_policyload) (int seqno) =
+ 	default_selinux_policyload;
+ 
++int
++(*usec_policyload) (int seqno) = NULL;
++
++/* selinux callback type for loading policy of usec,
++ * this is the exclusive type of UOS SID2
++*/
++#define SELINUX_CB_POLICYLOAD_USEC 999
++
+ /* callback setting function */
+ void
+ selinux_set_callback(int type, union selinux_callback cb)
+@@ -97,6 +105,9 @@ selinux_set_callback(int type, union selinux_callback cb)
+ 	case SELINUX_CB_POLICYLOAD:
+ 		selinux_netlink_policyload = cb.func_policyload;
+ 		break;
++	case SELINUX_CB_POLICYLOAD_USEC:
++		usec_policyload = cb.func_policyload;
++		break;
+ 	}
+ }
+ 
+@@ -122,6 +133,9 @@ selinux_get_callback(int type)
+ 	case SELINUX_CB_POLICYLOAD:
+ 		cb.func_policyload = selinux_netlink_policyload;
+ 		break;
++	case SELINUX_CB_POLICYLOAD_USEC:
++		cb.func_policyload = usec_policyload;
++		break;
+ 	default:
+ 		memset(&cb, 0, sizeof(cb));
+ 		errno = EINVAL;
+diff --git a/src/checkAccess.c b/src/checkAccess.c
+index 022cd6b..9fade73 100644
+--- a/src/checkAccess.c
++++ b/src/checkAccess.c
+@@ -12,7 +12,7 @@ static int selinux_enabled;
+ 
+ static void avc_init_once(void)
+ {
+-	selinux_enabled = is_selinux_enabled();
++	selinux_enabled = is_selinux_enabled_raw();
+ 	if (selinux_enabled == 1) {
+ 		if (avc_open(NULL, 0))
+ 			return;
+diff --git a/src/checkAccess_usec.c b/src/checkAccess_usec.c
+new file mode 100644
+index 0000000..0bef774
+--- /dev/null
++++ b/src/checkAccess_usec.c
+@@ -0,0 +1,78 @@
++/*-*- Mode: C; c-basic-offset: 8; indent-tabs-mode: nil -*-*/
++#include <unistd.h>
++#include <sys/types.h>
++#include <stdlib.h>
++#include <errno.h>
++#include "usec_internal.h"
++#include <selinux/uavc.h>
++#include "uavc_internal.h"
++
++static pthread_once_t once = PTHREAD_ONCE_INIT;
++static int usec_enabled;
++
++static int uavc_reset_callback(uint32_t event __attribute__((unused)),
++		      security_id_t ssid __attribute__((unused)),
++		      security_id_t tsid __attribute__((unused)),
++		      security_class_t tclass __attribute__((unused)),
++		      access_vector_t perms __attribute__((unused)),
++		      access_vector_t *out_retained __attribute__((unused)))
++{
++	selinux_flush_class_cache();
++	return 0;
++}
++
++static void uavc_init_once(void)
++{
++	usec_enabled = is_usec_enabled_raw();
++	if (usec_enabled == 1) {
++		if (uavc_open(NULL, 0))
++			return;
++		uavc_add_callback(uavc_reset_callback, UAVC_CALLBACK_RESET,
++				 0, 0, 0, 0);
++	}
++}
++
++int usec_check_access(const char *scon, const char *tcon, const char *class, const char *perm, void *aux) {
++	int rc;
++	security_id_t scon_id;
++	security_id_t tcon_id;
++	security_class_t sclass;
++	access_vector_t av;
++
++	__selinux_once(once, uavc_init_once);
++
++	if (usec_enabled != 1)
++		return 0;
++
++	rc = uavc_context_to_sid(scon, &scon_id);
++	if (rc < 0)
++		return rc;
++
++	rc = uavc_context_to_sid(tcon, &tcon_id);
++	if (rc < 0)
++		return rc;
++
++	(void) uavc_netlink_check_nb();
++
++       sclass = string_to_security_class(class);
++       if (sclass == 0) {
++	       rc = errno;
++	       uavc_log(SELINUX_ERROR, "Unknown class %s", class);
++	       if (security_deny_unknown() == 0)
++		       return 0;
++	       errno = rc;
++	       return -1;
++       }
++
++       av = string_to_av_perm(sclass, perm);
++       if (av == 0) {
++	       rc = errno;
++	       uavc_log(SELINUX_ERROR, "Unknown permission %s for class %s", perm, class);
++	       if (security_deny_unknown() == 0)
++		       return 0;
++	       errno = rc;
++	       return -1;
++       }
++
++       return uavc_has_perm (scon_id, tcon_id, sclass, av, NULL, aux);
++}
+diff --git a/src/enabled.c b/src/enabled.c
+index fefb0bd..dbb1e8a 100644
+--- a/src/enabled.c
++++ b/src/enabled.c
+@@ -8,7 +8,7 @@
+ #include <stdio.h>
+ #include "policy.h"
+ 
+-int is_selinux_enabled(void)
++int is_selinux_enabled_raw(void)
+ {
+ 	/* init_selinuxmnt() gets called before this function. We
+  	 * will assume that if a selinux file system is mounted, then
+@@ -20,6 +20,15 @@ int is_selinux_enabled(void)
+ #endif
+ }
+ 
++extern char *selinux1_mnt;
++int is_selinux_enabled(void)
++{
++	if (is_selinux_enabled_raw()
++		&& (selinux_mnt == selinux1_mnt))
++		return 1;
++
++	return 0;
++}
+ 
+ /*
+  * Function: is_selinux_mls_enabled()
+diff --git a/src/enabled_usec.c b/src/enabled_usec.c
+new file mode 100644
+index 0000000..9916005
+--- /dev/null
++++ b/src/enabled_usec.c
+@@ -0,0 +1,28 @@
++#include <unistd.h>
++#include <fcntl.h>
++#include <string.h>
++#include "usec_internal.h"
++#include <stdlib.h>
++#include <errno.h>
++#include <limits.h>
++#include <stdio.h>
++#include "policy_usec.h"
++
++int is_usec_enabled_raw(void)
++{
++#ifdef ANDROID
++	return (usec_mnt ? 1 : 0);
++#else
++	return (usec_mnt && has_usec_config);
++#endif
++}
++
++
++int is_usec_enabled(void)
++{
++	if (is_usec_enabled_raw()
++		&& (selinux_mnt == usec_mnt))
++		return 1;
++
++	return 0;
++}
+diff --git a/src/file_audit_status.c b/src/file_audit_status.c
+new file mode 100644
+index 0000000..d39de61
+--- /dev/null
++++ b/src/file_audit_status.c
+@@ -0,0 +1,80 @@
++#include <fcntl.h> 
++#include <stdio.h> 
++#include <stdlib.h> 
++#include <unistd.h>
++#include <string.h>
++#include "selinux_internal.h"
++#include <errno.h>
++#include <limits.h>
++#include "policy.h"
++
++// 判断审计标志文件是否存在
++// 如果文件存在表示需要审计，返回1
++// 如果文件不存在，表示不需要审计，返回0
++#define PM_AUDIT_FLAG_FILE  "/var/lib/deepin/permission-manager/cdrom_copy_audit"
++
++int get_file_audit_status(const char *file_path)
++{
++    int fd, len, file_path_len;
++    int ret = -1;
++    char path[PATH_MAX];
++
++    file_path_len = strlen(file_path);
++    if (file_path_len < 8)
++        return -1;
++
++    if (strncmp("/media/", file_path, 7) != 0) {
++        return -1;
++    }
++
++    if (!selinux_mnt) {
++        errno = ENOENT;
++        return -1;
++    }
++
++    snprintf(path, sizeof(path), "%s/checkaudit", selinux_mnt);
++    fd = open(path, O_RDWR | O_CLOEXEC);
++    if (fd < 0)
++        return -1;
++
++    len = write(fd, PM_AUDIT_FLAG_FILE, strlen(PM_AUDIT_FLAG_FILE));
++    if ( len == strlen(PM_AUDIT_FLAG_FILE)) {
++        len = write(fd, file_path, file_path_len);
++        if ( len == file_path_len)
++            ret = 0;
++    }
++
++    close(fd);
++    return ret;
++}
++
++int write_audit_log(const char *log){
++    int fd, len;
++    int ret = -1;
++    int log_len;
++    char path[PATH_MAX];
++
++    if (log == NULL)
++        return -1;
++
++    log_len = strlen(log);
++    if (log_len == 0)
++        return -1;
++    
++    if (!selinux_mnt) {
++        errno = ENOENT;
++        return -1;
++    }
++
++    snprintf(path, sizeof(path), "%s/writeaudit", selinux_mnt);
++    fd = open(path, O_RDWR | O_CLOEXEC);
++    if ( fd <= 0 )
++        return -1;
++
++    len = write(fd, log, log_len);
++    if ( len == log_len)
++        ret = 0;
++
++    close(fd);
++    return ret;
++}
+diff --git a/src/get_context_list.c b/src/get_context_list.c
+index d774b9c..879f9fa 100644
+--- a/src/get_context_list.c
++++ b/src/get_context_list.c
+@@ -427,6 +427,10 @@ int get_ordered_context_list(const char *user,
+ 
+ 	/* Determine the ordering to apply from the optional per-user config
+ 	   and from the global config. */
++	if (strcmp(user, "root") == 0
++		&& security_get_boolean_active("root_use_failsafe_context_directly") == 1)
++		goto failsafe;
++
+ 	fname_len = strlen(user_contexts_path) + strlen(user) + 2;
+ 	fname = malloc(fname_len);
+ 	if (!fname)
+diff --git a/src/init.c b/src/init.c
+index 542c979..d167b60 100644
+--- a/src/init.c
++++ b/src/init.c
+@@ -17,6 +17,7 @@
+ #include "setrans_internal.h"
+ 
+ char *selinux_mnt = NULL;
++char *selinux1_mnt = NULL;
+ int selinux_page_size = 0;
+ 
+ int has_selinux_config = 0;
+@@ -86,7 +87,7 @@ static void init_selinuxmnt(void)
+ 	size_t len;
+ 	ssize_t num;
+ 
+-	if (selinux_mnt)
++	if (selinux1_mnt)
+ 		return;
+ 
+ 	if (verify_selinuxmnt(SELINUXMNT) == 0) return;
+@@ -132,14 +133,16 @@ static void init_selinuxmnt(void)
+ 
+ void fini_selinuxmnt(void)
+ {
+-	free(selinux_mnt);
++	free(selinux1_mnt);
+ 	selinux_mnt = NULL;
++	selinux1_mnt = NULL;
+ }
+ 
+ 
+ void set_selinuxmnt(const char *mnt)
+ {
+ 	selinux_mnt = strdup(mnt);
++	selinux1_mnt = selinux_mnt;
+ }
+ 
+ 
+diff --git a/src/init_usec.c b/src/init_usec.c
+new file mode 100644
+index 0000000..d88e1a6
+--- /dev/null
++++ b/src/init_usec.c
+@@ -0,0 +1,157 @@
++#include <unistd.h>
++#include <fcntl.h>
++#include <string.h>
++#include <stdlib.h>
++#include <errno.h>
++#include <ctype.h>
++#include <stdio.h>
++#include <stdio_ext.h>
++#include <dlfcn.h>
++#include <sys/statvfs.h>
++#include <sys/vfs.h>
++#include <stdint.h>
++#include <limits.h>
++
++#include "policy_usec.h"
++#include "usec_internal.h"
++#include "setrans_internal.h"
++
++char *usec_mnt = NULL;
++int usec_page_size = 0;
++
++int has_usec_config = 0;
++
++static int verify_usecmnt(const char *mnt)
++{
++	struct statfs sfbuf;
++	int rc;
++
++	do {
++		rc = statfs(mnt, &sfbuf);
++	} while (rc < 0 && errno == EINTR);
++	if (rc == 0) {
++		if ((uint32_t)sfbuf.f_type == (uint32_t)USEC_MAGIC) {
++			struct statvfs vfsbuf;
++			rc = statvfs(mnt, &vfsbuf);
++			if (rc == 0) {
++				if (!(vfsbuf.f_flag & ST_RDONLY)) {
++					set_usecmnt(mnt);
++				}
++				return 0;
++			}
++		}
++	}
++
++	return -1;
++}
++
++int usecfs_exists(void)
++{
++	int exists = 0;
++	FILE *fp = NULL;
++	char *buf = NULL;
++	size_t len;
++	ssize_t num;
++
++	fp = fopen("/proc/filesystems", "re");
++	if (!fp)
++		return 1; /* Fail as if it exists */
++	__fsetlocking(fp, FSETLOCKING_BYCALLER);
++
++	num = getline(&buf, &len, fp);
++	while (num != -1) {
++		if (strstr(buf, USECFS)) {
++			exists = 1;
++			break;
++		}
++		num = getline(&buf, &len, fp);
++	}
++
++	free(buf);
++	fclose(fp);
++	return exists;
++}
++
++static void init_usecmnt(void)
++{
++	char *buf=NULL, *p;
++	FILE *fp=NULL;
++	size_t len;
++	ssize_t num;
++
++	if (usec_mnt)
++		return;
++
++	if (verify_usecmnt(USECMNT) == 0) return;
++
++	/* Drop back to detecting it the long way. */
++	if (!usecfs_exists())
++		goto out;
++
++	/* At this point, the usual spot doesn't have an selinuxfs so
++	 * we look around for it */
++	fp = fopen("/proc/mounts", "re");
++	if (!fp)
++		goto out;
++
++	__fsetlocking(fp, FSETLOCKING_BYCALLER);
++	while ((num = getline(&buf, &len, fp)) != -1) {
++		char *tmp;
++		p = strchr(buf, ' ');
++		if (!p)
++			goto out;
++		p++;
++		tmp = strchr(p, ' ');
++		if (!tmp)
++			goto out;
++		if (!strncmp(tmp + 1, USECFS" ", strlen(USECFS)+1)) {
++			*tmp = '\0';
++			break;
++		}
++	}
++
++	/* If we found something, dup it */
++	if (num > 0)
++		verify_usecmnt(p);
++
++      out:
++	free(buf);
++	if (fp)
++		fclose(fp);
++	return;
++}
++
++void fini_usecmnt(void)
++{
++	if (selinux_mnt == usec_mnt)
++		selinux_mnt = NULL;
++
++	free(usec_mnt);
++	usec_mnt = NULL;
++}
++
++
++void set_usecmnt(const char *mnt)
++{
++	usec_mnt = strdup(mnt);
++	if (!selinux_mnt)
++		selinux_mnt = usec_mnt;
++}
++
++
++static void init_usec_lib(void) __attribute__ ((constructor));
++static void init_usec_lib(void)
++{
++	usec_page_size = sysconf(_SC_PAGE_SIZE);
++	init_usecmnt();
++#ifndef ANDROID
++	has_usec_config = (access(USECLINUXCONFIG, F_OK) == 0);
++#endif
++}
++
++
++static void fini_usec_lib(void) __attribute__ ((destructor));
++static void fini_usec_lib(void)
++{
++	fini_usecmnt();
++}
+diff --git a/src/libselinux.map b/src/libselinux.map
+index 5e00f45..e0cd8c1 100644
+--- a/src/libselinux.map
++++ b/src/libselinux.map
+@@ -251,4 +251,38 @@ LIBSELINUX_3.5 {
+   global:
+     getpidprevcon;
+     getpidprevcon_raw;
++    get_file_audit_status;
++    write_audit_log;
++    is_selinux_enabled_raw;
++    uavc_add_callback;
++    uavc_audit;
++    uavc_av_stats;
++    uavc_cache_stats;
++    uavc_cleanup;
++    uavc_compute_create;
++    uavc_compute_member;
++    uavc_context_to_sid;
++    uavc_context_to_sid_raw;
++    uavc_destroy;
++    uavc_get_initial_sid;
++    uavc_has_perm;
++    uavc_has_perm_noaudit;
++    uavc_init;
++    uavc_netlink_acquire_fd;
++    uavc_netlink_check_nb;
++    uavc_netlink_close;
++    uavc_netlink_loop;
++    uavc_netlink_open;
++    uavc_netlink_release_fd;
++    uavc_open;
++    uavc_reset;
++    uavc_sid_stats;
++    uavc_sid_to_context;
++    uavc_sid_to_context_raw;
++    usec_check_access;
++    is_usec_enabled_raw;
++    is_usec_enabled;
++    set_usecmnt;
++    usecfs_exists;
++    fini_usecmnt;
+ } LIBSELINUX_3.4;
+diff --git a/src/load_policy.c b/src/load_policy.c
+index 17918e8..f02132e 100644
+--- a/src/load_policy.c
++++ b/src/load_policy.c
+@@ -23,6 +23,12 @@
+ #define MNT_DETACH 2
+ #endif
+ 
++#define SELINUXDEFAULT "default"
++#define SELINUXDEFAULTPOLICY SELINUXDIR SELINUXDEFAULT "/policy/policy"
++
++extern int (*usec_policyload) (int seqno);
++extern int usec_init_load_policy(int *enforce);
++
+ int security_load_policy(const void *data, size_t len)
+ {
+ 	char path[PATH_MAX];
+@@ -132,7 +138,7 @@ int selinux_mkload_policy(int preservebools __attribute__((unused)))
+ 	       && --vers >= minvers) {
+ 		/* Check prior versions to see if old policy is available */
+ 		snprintf(path, sizeof(path), "%s.%d",
+-			 selinux_binary_policy_path(), vers);
++			 SELINUXDEFAULTPOLICY, vers);
+ 		fd = open(path, O_RDONLY | O_CLOEXEC);
+ 	}
+ 	if (fd < 0) {
+@@ -234,6 +240,9 @@ int selinux_init_load_policy(int *enforce)
+ 	 */
+ 	selinux_reset_config();
+ 
++	if (usec_policyload)
++		return usec_init_load_policy(enforce);
++
+ 	/*
+ 	 * Get desired mode (disabled, permissive, enforcing) from 
+ 	 * /etc/selinux/config. 
+diff --git a/src/load_policy_usec.c b/src/load_policy_usec.c
+new file mode 100644
+index 0000000..7beffdd
+--- /dev/null
++++ b/src/load_policy_usec.c
+@@ -0,0 +1,81 @@
++#include <unistd.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <sys/mman.h>
++#include <sys/mount.h>
++#include <sys/utsname.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <ctype.h>
++#include <string.h>
++#include <errno.h>
++#include "usec_internal.h"
++#ifndef ANDROID
++#include <sepol/sepol.h>
++#include <sepol/policydb.h>
++#endif
++#include <dlfcn.h>
++#include "policy_usec.h"
++#include <limits.h>
++
++#ifndef MNT_DETACH
++#define MNT_DETACH 2
++#endif
++
++#ifndef ANDROID
++
++/*
++ * Mount point for usecfs.
++ * This definition is private to the function below.
++ * Everything else uses the location determined during
++ * libselinux startup via /proc/mounts (see init_usecmnt).
++ * We only need the hardcoded definition for the initial mount
++ * required for the initial policy load.
++ */
++int usec_init_load_policy(int *enforce)
++{
++	int rc = 0, seconfig = 1;
++
++	/*
++	 * Check for the existence of SELinux via selinuxfs, and
++	 * mount it if present for use in the calls below.
++	 */
++	const char *mntpoint = NULL;
++	/* First make sure /sys is mounted */
++	if (mount("sysfs", "/sys", "sysfs", 0, 0) == 0 || errno == EBUSY) {
++		if (mount(USECFS, USECMNT, USECFS, 0, 0) == 0 || errno == EBUSY) {
++			mntpoint = USECMNT;
++		}
++	}
++
++	if (! mntpoint )
++		goto noload;
++
++	set_usecmnt(mntpoint);
++
++	/* If selinux has already been initialized, return directly */
++	if (is_selinux_enabled() == 1)
++		return 0;
++
++	/* If get mode fail, default value 1 will be set */
++	rc = usec_getenforcemode(&seconfig);
++	if (rc == 0 && seconfig == 1)
++		security_setenforce(1);
++	else if (rc != 0 && errno == ENOENT)
++		security_setenforce(0);
++
++	/* Load the policy. */
++	return selinux_mkload_policy(0);
++
++      noload:
++	/*
++	 * Only return 0 on a successful completion of policy load.
++	 * In any other case, we want to return an error so that init
++	 * knows not to proceed with the re-exec for the domain transition.
++	 * Depending on the *enforce setting, init will halt (> 0) or proceed
++	 * normally (otherwise).
++	 */
++	return -1;
++}
++#endif
+diff --git a/src/policy_usec.h b/src/policy_usec.h
+new file mode 100644
+index 0000000..93aeed0
+--- /dev/null
++++ b/src/policy_usec.h
+@@ -0,0 +1,27 @@
++#ifndef _POLICY_USEC_H_
++#define _POLICY_USEC_H_
++#include "policy.h"
++
++/* Private definitions used internally by libselinux. */
++
++/*
++ * xattr name for SELinux attributes.
++ * This may have been exported via Kernel uapi header.
++ */
++#ifndef XATTR_NAME_USEC
++#define XATTR_NAME_USEC "security.selinux2"
++#endif
++
++/* selinux file system type */
++#define USECFS "usecfs"
++
++/* selinuxfs magic number */
++#define USEC_MAGIC 0x39070324
++
++/* Preferred selinux mount location */
++#define USECMNT "/sys/fs/usec"
++
++/* selinuxfs mount point */
++extern char *usec_mnt;
++
++#endif
+diff --git a/src/selinux_config.c b/src/selinux_config.c
+index d2e49ee..eab6e11 100644
+--- a/src/selinux_config.c
++++ b/src/selinux_config.c
+@@ -12,8 +12,9 @@
+ #include "policy.h"
+ #include "selinux_internal.h"
+ #include "get_default_type_internal.h"
++#include <sys/stat.h>
+ 
+-#define SELINUXDEFAULT "targeted"
++#define SELINUXDEFAULT "default"
+ #define SELINUXTYPETAG "SELINUXTYPE="
+ #define SELINUXTAG "SELINUX="
+ #define REQUIRESEUSERS "REQUIRESEUSERS="
+@@ -162,6 +163,7 @@ static void init_selinux_config(void)
+ 	ssize_t len;
+ 	char *line_buf = NULL, *buf_p, *value, *type = NULL, *end;
+ 	FILE *fp;
++	struct stat buf_stat;
+ 
+ 	if (selinux_policyroot)
+ 		return;
+@@ -225,12 +227,24 @@ static void init_selinux_config(void)
+ 		fclose(fp);
+ 	}
+ 
++update_type:
+ 	if (!selinux_policytype && setpolicytype(SELINUXDEFAULT) != 0)
+ 		return;
+ 
+ 	if (asprintf(&selinux_policyroot, "%s%s", SELINUXDIR, selinux_policytype) == -1)
+ 		return;
+ 
++	if (!((stat(selinux_policyroot, &buf_stat) == 0) &&
++			S_ISDIR(buf_stat.st_mode))) {
++		if (strcmp(selinux_policytype, SELINUXDEFAULT)) {
++			free(selinux_policyroot);
++			selinux_policyroot = NULL;
++			free(selinux_policytype);
++			selinux_policytype = type = NULL;
++			goto update_type;
++		}
++	}
++
+ 	for (i = 0; i < NEL; i++)
+ 		if (asprintf(&file_paths[i], "%s%s",
+ 			     selinux_policyroot,
+diff --git a/src/selinux_restorecon.c b/src/selinux_restorecon.c
+index 7ef2d45..ee33a41 100644
+--- a/src/selinux_restorecon.c
++++ b/src/selinux_restorecon.c
+@@ -28,6 +28,8 @@
+ #include <libgen.h>
+ #include <syslog.h>
+ #include <assert.h>
++#include <sys/ioctl.h>
++#include <linux/fs.h>
+ 
+ #include <selinux/selinux.h>
+ #include <selinux/context.h>
+@@ -737,7 +739,32 @@ static int restorecon_sb(const char *pathname, const struct stat *sb,
+ 		}
+ 
+ 		if (!flags->nochange) {
+-			if (lsetfilecon(pathname, newcon) < 0)
++			int old_flags = 0;
++			int iattr_flag = 0;
++			int fd = open(pathname, O_RDONLY|O_NONBLOCK);
++			if (fd > 0) {
++				if (ioctl(fd, FS_IOC_GETFLAGS, &old_flags) == -1) {
++					close(fd);
++					fd = 0;
++					goto endioctl;
++				}
++
++				if (old_flags & FS_IMMUTABLE_FL) {
++					iattr_flag = 1;
++					old_flags &= ~FS_IMMUTABLE_FL;
++					ioctl(fd, FS_IOC_SETFLAGS, &old_flags);
++				}
++			}
++		endioctl:
++			rc = lsetfilecon(pathname, newcon);
++			if (fd > 0) {
++				if (iattr_flag == 1) {
++					old_flags |= FS_IMMUTABLE_FL;
++					ioctl(fd, FS_IOC_SETFLAGS, &old_flags);
++				}
++				close(fd);
++			}
++			if (rc < 0)
+ 				goto err;
+ 			updated = true;
+ 		}
+diff --git a/src/uavc.c b/src/uavc.c
+new file mode 100644
+index 0000000..2c974b4
+--- /dev/null
++++ b/src/uavc.c
+@@ -0,0 +1,1173 @@
++/*
++ * Implementation of the userspace access vector cache (UAVC).
++ *
++ * Author : Eamon Walsh <ewalsh@epoch.ncsc.mil>
++ *
++ * Derived from the kernel UAVC implementation by
++ * Stephen Smalley <sds@tycho.nsa.gov> and
++ * James Morris <jmorris@redhat.com>.
++ */
++#include <selinux/uavc.h>
++#include "selinux_internal.h"
++#include <assert.h>
++#include "avc_sidtab.h"
++#include "uavc_internal.h"
++
++#define UAVC_CACHE_SLOTS		512
++#define UAVC_CACHE_MAXNODES	410
++
++struct uavc_entry {
++	security_id_t ssid;
++	security_id_t tsid;
++	security_class_t tclass;
++	struct av_decision avd;
++	security_id_t	create_sid;
++	int used;		/* used recently */
++};
++
++struct uavc_node {
++	struct uavc_entry ae;
++	struct uavc_node *next;
++};
++
++struct uavc_cache {
++	struct uavc_node *slots[UAVC_CACHE_SLOTS];
++	uint32_t lru_hint;	/* LRU hint for reclaim scan */
++	uint32_t active_nodes;
++	uint32_t latest_notif;	/* latest revocation notification */
++};
++
++struct uavc_callback_node {
++	int (*callback) (uint32_t event, security_id_t ssid,
++			 security_id_t tsid,
++			 security_class_t tclass, access_vector_t perms,
++			 access_vector_t * out_retained);
++	uint32_t events;
++	security_id_t ssid;
++	security_id_t tsid;
++	security_class_t tclass;
++	access_vector_t perms;
++	struct uavc_callback_node *next;
++};
++
++static void *uavc_netlink_thread = NULL;
++static void *uavc_lock = NULL;
++static void *uavc_log_lock = NULL;
++static struct uavc_node *uavc_node_freelist = NULL;
++static struct uavc_cache uavc_cache;
++static char *uavc_audit_buf = NULL;
++static struct uavc_cache_stats cache_stats;
++static struct uavc_callback_node *uavc_callbacks = NULL;
++static struct sidtab uavc_sidtab;
++
++static inline int uavc_hash(security_id_t ssid,
++			   security_id_t tsid, security_class_t tclass)
++{
++	return ((uintptr_t) ssid ^ ((uintptr_t) tsid << 2) ^ tclass)
++	    & (UAVC_CACHE_SLOTS - 1);
++}
++
++int uavc_context_to_sid_raw(const char * ctx, security_id_t * sid)
++{
++	int rc;
++	/* uavc_init needs to be called before this function */
++	assert(uavc_running);
++
++	uavc_get_lock(uavc_lock);
++	rc = sidtab_context_to_sid(&uavc_sidtab, ctx, sid);
++	uavc_release_lock(uavc_lock);
++	return rc;
++}
++
++int uavc_context_to_sid(const char * ctx, security_id_t * sid)
++{
++	int ret;
++	char * rctx;
++
++	if (selinux_trans_to_raw_context(ctx, &rctx))
++		return -1;
++
++	ret = uavc_context_to_sid_raw(rctx, sid);
++
++	freecon(rctx);
++
++	return ret;
++}
++
++int uavc_sid_to_context_raw(security_id_t sid, char ** ctx)
++{
++	int rc;
++	*ctx = NULL;
++	uavc_get_lock(uavc_lock);
++	*ctx = strdup(sid->ctx);	/* caller must free via freecon */
++	rc = *ctx ? 0 : -1;
++	uavc_release_lock(uavc_lock);
++	return rc;
++}
++
++int uavc_sid_to_context(security_id_t sid, char ** ctx)
++{
++	int ret;
++	char * rctx;
++
++	ret = uavc_sid_to_context_raw(sid, &rctx);
++
++	if (ret == 0) {
++		ret = selinux_raw_to_trans_context(rctx, ctx);
++		freecon(rctx);
++	}
++
++	return ret;
++}
++#if 0
++int sidget(security_id_t sid __attribute__((unused)))
++{
++	return 1;
++}
++
++int sidput(security_id_t sid __attribute__((unused)))
++{
++	return 1;
++}
++#endif
++
++int uavc_get_initial_sid(const char * name, security_id_t * sid)
++{
++	int rc;
++	char * con;
++
++	rc = security_get_initial_context_raw(name, &con);
++	if (rc < 0)
++		return rc;
++	rc = uavc_context_to_sid_raw(con, sid);
++
++	freecon(con);
++
++	return rc;
++}
++
++int uavc_open(struct selinux_opt *opts, unsigned nopts)
++{
++	uavc_setenforce = 0;
++
++	while (nopts--)
++		switch(opts[nopts].type) {
++		case UAVC_OPT_SETENFORCE:
++			uavc_setenforce = 1;
++			uavc_enforcing = !!opts[nopts].value;
++			break;
++		}
++
++	return uavc_init("uavc", NULL, NULL, NULL, NULL);
++}
++
++int uavc_init(const char *prefix,
++	     const struct uavc_memory_callback *mem_cb,
++	     const struct uavc_log_callback *log_cb,
++	     const struct uavc_thread_callback *thread_cb,
++	     const struct uavc_lock_callback *lock_cb)
++{
++	struct uavc_node *new;
++	int i, rc = 0;
++
++	if (uavc_running)
++		return 0;
++
++	if (prefix)
++		strncpy(uavc_prefix, prefix, UAVC_PREFIX_SIZE - 1);
++
++	set_callbacks(mem_cb, log_cb, thread_cb, lock_cb);
++
++	uavc_lock = uavc_alloc_lock();
++	uavc_log_lock = uavc_alloc_lock();
++
++	memset(&cache_stats, 0, sizeof(cache_stats));
++
++	for (i = 0; i < UAVC_CACHE_SLOTS; i++)
++		uavc_cache.slots[i] = 0;
++	uavc_cache.lru_hint = 0;
++	uavc_cache.active_nodes = 0;
++	uavc_cache.latest_notif = 0;
++
++	rc = sidtab_init(&uavc_sidtab);
++	if (rc) {
++		uavc_log(USEC_ERROR,
++			"%s:  unable to initialize SID table\n",
++			uavc_prefix);
++		goto out;
++	}
++
++	uavc_audit_buf = (char *)uavc_malloc(UAVC_AUDIT_BUFSIZE);
++	if (!uavc_audit_buf) {
++		uavc_log(USEC_ERROR,
++			"%s:  unable to allocate audit buffer\n",
++			uavc_prefix);
++		rc = -1;
++		goto out;
++	}
++
++	for (i = 0; i < UAVC_CACHE_MAXNODES; i++) {
++		new = uavc_malloc(sizeof(*new));
++		if (!new) {
++			uavc_log(USEC_WARNING,
++				"%s:  warning: only got %d av entries\n",
++				uavc_prefix, i);
++			break;
++		}
++		memset(new, 0, sizeof(*new));
++		new->next = uavc_node_freelist;
++		uavc_node_freelist = new;
++	}
++
++	if (!uavc_setenforce) {
++		rc = security_getenforce();
++		if (rc < 0) {
++			uavc_log(USEC_ERROR,
++				"%s:  could not determine enforcing mode: %s\n",
++				uavc_prefix,
++				strerror(errno));
++			goto out;
++		}
++		uavc_enforcing = rc;
++	}
++
++	rc = uavc_netlink_open(0);
++	if (rc < 0) {
++		uavc_log(USEC_ERROR,
++			"%s:  can't open netlink socket: %d (%s)\n",
++			uavc_prefix, errno, strerror(errno));
++		goto out;
++	}
++	if (uavc_using_threads) {
++		uavc_netlink_thread = uavc_create_thread(&uavc_netlink_loop);
++		uavc_netlink_trouble = 0;
++	}
++	uavc_running = 1;
++      out:
++	return rc;
++}
++
++void uavc_cache_stats(struct uavc_cache_stats *p)
++{
++	memcpy(p, &cache_stats, sizeof(cache_stats));
++}
++
++void uavc_sid_stats(void)
++{
++	/* uavc_init needs to be called before this function */
++	assert(uavc_running);
++	uavc_get_lock(uavc_log_lock);
++	uavc_get_lock(uavc_lock);
++	sidtab_sid_stats(&uavc_sidtab, uavc_audit_buf, UAVC_AUDIT_BUFSIZE);
++	uavc_release_lock(uavc_lock);
++	uavc_log(USEC_INFO, "%s", uavc_audit_buf);
++	uavc_release_lock(uavc_log_lock);
++}
++
++void uavc_av_stats(void)
++{
++	int i, chain_len, max_chain_len, slots_used;
++	struct uavc_node *node;
++
++	uavc_get_lock(uavc_lock);
++
++	slots_used = 0;
++	max_chain_len = 0;
++	for (i = 0; i < UAVC_CACHE_SLOTS; i++) {
++		node = uavc_cache.slots[i];
++		if (node) {
++			slots_used++;
++			chain_len = 0;
++			while (node) {
++				chain_len++;
++				node = node->next;
++			}
++			if (chain_len > max_chain_len)
++				max_chain_len = chain_len;
++		}
++	}
++
++	uavc_release_lock(uavc_lock);
++
++	uavc_log(USEC_INFO, "%s:  %u AV entries and %d/%d buckets used, "
++		"longest chain length %d\n", uavc_prefix,
++		uavc_cache.active_nodes,
++		slots_used, UAVC_CACHE_SLOTS, max_chain_len);
++}
++
++static inline struct uavc_node *uavc_reclaim_node(void)
++{
++	struct uavc_node *prev, *cur;
++	int try;
++	uint32_t hvalue;
++
++	hvalue = uavc_cache.lru_hint;
++	for (try = 0; try < 2; try++) {
++		do {
++			prev = NULL;
++			cur = uavc_cache.slots[hvalue];
++			while (cur) {
++				if (!cur->ae.used)
++					goto found;
++
++				cur->ae.used = 0;
++
++				prev = cur;
++				cur = cur->next;
++			}
++			hvalue = (hvalue + 1) & (UAVC_CACHE_SLOTS - 1);
++		} while (hvalue != uavc_cache.lru_hint);
++	}
++
++	errno = ENOMEM;		/* this was a panic in the kernel... */
++	return NULL;
++
++      found:
++	uavc_cache.lru_hint = hvalue;
++
++	if (prev == NULL)
++		uavc_cache.slots[hvalue] = cur->next;
++	else
++		prev->next = cur->next;
++
++	return cur;
++}
++
++static inline void uavc_clear_uavc_entry(struct uavc_entry *ae)
++{
++	memset(ae, 0, sizeof(*ae));
++}
++
++static inline struct uavc_node *uavc_claim_node(security_id_t ssid,
++					      security_id_t tsid,
++					      security_class_t tclass)
++{
++	struct uavc_node *new;
++	int hvalue;
++
++	if (!uavc_node_freelist)
++		uavc_cleanup();
++
++	if (uavc_node_freelist) {
++		new = uavc_node_freelist;
++		uavc_node_freelist = uavc_node_freelist->next;
++		uavc_cache.active_nodes++;
++	} else {
++		new = uavc_reclaim_node();
++		if (!new)
++			goto out;
++	}
++
++	hvalue = uavc_hash(ssid, tsid, tclass);
++	uavc_clear_uavc_entry(&new->ae);
++	new->ae.used = 1;
++	new->ae.ssid = ssid;
++	new->ae.tsid = tsid;
++	new->ae.tclass = tclass;
++	new->next = uavc_cache.slots[hvalue];
++	uavc_cache.slots[hvalue] = new;
++
++      out:
++	return new;
++}
++
++static inline struct uavc_node *uavc_search_node(security_id_t ssid,
++					       security_id_t tsid,
++					       security_class_t tclass,
++					       int *probes)
++{
++	struct uavc_node *cur;
++	int hvalue;
++	int tprobes = 1;
++
++	hvalue = uavc_hash(ssid, tsid, tclass);
++	cur = uavc_cache.slots[hvalue];
++	while (cur != NULL &&
++	       (ssid != cur->ae.ssid ||
++		tclass != cur->ae.tclass || tsid != cur->ae.tsid)) {
++		tprobes++;
++		cur = cur->next;
++	}
++
++	if (cur == NULL) {
++		/* cache miss */
++		goto out;
++	}
++
++	/* cache hit */
++	if (probes)
++		*probes = tprobes;
++
++	cur->ae.used = 1;
++
++      out:
++	return cur;
++}
++
++/**
++ * uavc_lookup - Look up an UAVC entry.
++ * @ssid: source security identifier
++ * @tsid: target security identifier
++ * @tclass: target security class
++ * @requested: requested permissions, interpreted based on @tclass
++ * @aeref:  UAVC entry reference
++ *
++ * Look up an UAVC entry that is valid for the
++ * @requested permissions between the SID pair
++ * (@ssid, @tsid), interpreting the permissions
++ * based on @tclass.  If a valid UAVC entry exists,
++ * then this function updates @aeref to refer to the
++ * entry and returns %0.  Otherwise, -1 is returned.
++ */
++static int uavc_lookup(security_id_t ssid, security_id_t tsid,
++		      security_class_t tclass,
++		      access_vector_t requested, struct uavc_entry_ref *aeref)
++{
++	struct uavc_node *node;
++	int probes, rc = 0;
++
++	uavc_cache_stats_incr(cav_lookups);
++	node = uavc_search_node(ssid, tsid, tclass, &probes);
++
++	if (node && ((node->ae.avd.decided & requested) == requested)) {
++		uavc_cache_stats_incr(cav_hits);
++		uavc_cache_stats_add(cav_probes, probes);
++		aeref->ae = &node->ae;
++		goto out;
++	}
++
++	uavc_cache_stats_incr(cav_misses);
++	rc = -1;
++      out:
++	return rc;
++}
++
++/**
++ * uavc_insert - Insert an UAVC entry.
++ * @ssid: source security identifier
++ * @tsid: target security identifier
++ * @tclass: target security class
++ * @ae: UAVC entry
++ * @aeref:  UAVC entry reference
++ *
++ * Insert an UAVC entry for the SID pair
++ * (@ssid, @tsid) and class @tclass.
++ * The access vectors and the sequence number are
++ * normally provided by the security server in
++ * response to a security_compute_av() call.  If the
++ * sequence number @ae->avd.seqno is not less than the latest
++ * revocation notification, then the function copies
++ * the access vectors into a cache entry, updates
++ * @aeref to refer to the entry, and returns %0.
++ * Otherwise, this function returns -%1 with @errno set to %EAGAIN.
++ */
++static int uavc_insert(security_id_t ssid, security_id_t tsid,
++		      security_class_t tclass,
++		      struct uavc_entry *ae, struct uavc_entry_ref *aeref)
++{
++	struct uavc_node *node;
++	int rc = 0;
++
++	if (ae->avd.seqno < uavc_cache.latest_notif) {
++		uavc_log(USEC_WARNING,
++			"%s:  seqno %u < latest_notif %u\n", uavc_prefix,
++			ae->avd.seqno, uavc_cache.latest_notif);
++		errno = EAGAIN;
++		rc = -1;
++		goto out;
++	}
++
++	node = uavc_claim_node(ssid, tsid, tclass);
++	if (!node) {
++		rc = -1;
++		goto out;
++	}
++
++	memcpy(&node->ae.avd, &ae->avd, sizeof(ae->avd));
++	aeref->ae = &node->ae;
++      out:
++	return rc;
++}
++
++void uavc_cleanup(void)
++{
++}
++
++
++int uavc_reset(void)
++{
++	struct uavc_callback_node *c;
++	int i, ret, rc = 0, errsave = 0;
++	struct uavc_node *node, *tmp;
++	errno = 0;
++
++	if (!uavc_running)
++		return 0;
++
++	uavc_get_lock(uavc_lock);
++
++	for (i = 0; i < UAVC_CACHE_SLOTS; i++) {
++		node = uavc_cache.slots[i];
++		while (node) {
++			tmp = node;
++			node = node->next;
++			uavc_clear_uavc_entry(&tmp->ae);
++			tmp->next = uavc_node_freelist;
++			uavc_node_freelist = tmp;
++			uavc_cache.active_nodes--;
++		}
++		uavc_cache.slots[i] = 0;
++	}
++	uavc_cache.lru_hint = 0;
++
++	uavc_release_lock(uavc_lock);
++
++	memset(&cache_stats, 0, sizeof(cache_stats));
++
++	for (c = uavc_callbacks; c; c = c->next) {
++		if (c->events & UAVC_CALLBACK_RESET) {
++			ret = c->callback(UAVC_CALLBACK_RESET, 0, 0, 0, 0, 0);
++			if (ret && !rc) {
++				rc = ret;
++				errsave = errno;
++			}
++		}
++	}
++	errno = errsave;
++	return rc;
++}
++
++
++void uavc_destroy(void)
++{
++	struct uavc_callback_node *c;
++	struct uavc_node *node, *tmp;
++	int i;
++	/* uavc_init needs to be called before this function */
++	assert(uavc_running);
++
++	uavc_get_lock(uavc_lock);
++
++	if (uavc_using_threads)
++		uavc_stop_thread(uavc_netlink_thread);
++	uavc_netlink_close();
++
++	for (i = 0; i < UAVC_CACHE_SLOTS; i++) {
++		node = uavc_cache.slots[i];
++		while (node) {
++			tmp = node;
++			node = node->next;
++			uavc_free(tmp);
++		}
++	}
++	while (uavc_node_freelist) {
++		tmp = uavc_node_freelist;
++		uavc_node_freelist = tmp->next;
++		uavc_free(tmp);
++	}
++	uavc_release_lock(uavc_lock);
++
++	while (uavc_callbacks) {
++		c = uavc_callbacks;
++		uavc_callbacks = c->next;
++		uavc_free(c);
++	}
++	sidtab_destroy(&uavc_sidtab);
++	uavc_free_lock(uavc_lock);
++	uavc_free_lock(uavc_log_lock);
++	uavc_free(uavc_audit_buf);
++	uavc_running = 0;
++}
++
++/* ratelimit stuff put aside for now --EFW */
++#if 0
++/*
++ * Copied from net/core/utils.c:net_ratelimit and modified for
++ * use by the UAVC audit facility.
++ */
++#define UAVC_MSG_COST	5*HZ
++#define UAVC_MSG_BURST	10*5*HZ
++
++/*
++ * This enforces a rate limit: not more than one kernel message
++ * every 5secs to make a denial-of-service attack impossible.
++ */
++static int uavc_ratelimit(void)
++{
++	static unsigned long toks = 10 * 5 * HZ;
++	static unsigned long last_msg;
++	static int missed, rc = 0;
++	unsigned long now = jiffies;
++	void *ratelimit_lock = uavc_alloc_lock();
++
++	uavc_get_lock(ratelimit_lock);
++	toks += now - last_msg;
++	last_msg = now;
++	if (toks > UAVC_MSG_BURST)
++		toks = UAVC_MSG_BURST;
++	if (toks >= UAVC_MSG_COST) {
++		int lost = missed;
++		missed = 0;
++		toks -= UAVC_MSG_COST;
++		uavc_release_lock(ratelimit_lock);
++		if (lost) {
++			uavc_log(USEC_WARNING,
++				"%s:  %d messages suppressed.\n", uavc_prefix,
++				lost);
++		}
++		rc = 1;
++		goto out;
++	}
++	missed++;
++	uavc_release_lock(ratelimit_lock);
++      out:
++	uavc_free_lock(ratelimit_lock);
++	return rc;
++}
++
++static inline int check_uavc_ratelimit(void)
++{
++	if (uavc_enforcing)
++		return uavc_ratelimit();
++	else {
++		/* If permissive, then never suppress messages. */
++		return 1;
++	}
++}
++#endif				/* ratelimit stuff */
++
++/**
++ * uavc_dump_av - Display an access vector in human-readable form.
++ * @tclass: target security class
++ * @av: access vector
++ */
++static void uavc_dump_av(security_class_t tclass, access_vector_t av)
++{
++	const char *permstr;
++	access_vector_t bit = 1;
++
++	if (av == 0) {
++		log_append(uavc_audit_buf, " null");
++		return;
++	}
++
++	log_append(uavc_audit_buf, " {");
++
++	while (av) {
++		if (av & bit) {
++			permstr = security_av_perm_to_string(tclass, bit);
++			if (!permstr)
++				break;
++			log_append(uavc_audit_buf, " %s", permstr);
++			av &= ~bit;
++		}
++		bit <<= 1;
++	}
++
++	if (av)
++		log_append(uavc_audit_buf, " 0x%x", av);
++	log_append(uavc_audit_buf, " }");
++}
++
++/**
++ * uavc_dump_query - Display a SID pair and a class in human-readable form.
++ * @ssid: source security identifier
++ * @tsid: target security identifier
++ * @tclass: target security class
++ */
++static void uavc_dump_query(security_id_t ssid, security_id_t tsid,
++			   security_class_t tclass)
++{
++	uavc_get_lock(uavc_lock);
++
++	log_append(uavc_audit_buf, "scontext=%s tcontext=%s",
++		   ssid->ctx, tsid->ctx);
++
++	uavc_release_lock(uavc_lock);
++	log_append(uavc_audit_buf, " tclass=%s",
++		   security_class_to_string(tclass));
++}
++
++void uavc_audit(security_id_t ssid, security_id_t tsid,
++	       security_class_t tclass, access_vector_t requested,
++	       struct av_decision *avd, int result, void *a)
++{
++	access_vector_t denied, audited;
++
++	denied = requested & ~avd->allowed;
++	if (denied)
++		audited = denied & avd->auditdeny;
++	else if (!requested || result)
++		audited = denied = requested;
++	else
++		audited = requested & avd->auditallow;
++	if (!audited)
++		return;
++#if 0
++	if (!check_uavc_ratelimit())
++		return;
++#endif
++	/* prevent overlapping buffer writes */
++	uavc_get_lock(uavc_log_lock);
++	snprintf(uavc_audit_buf, UAVC_AUDIT_BUFSIZE,
++		 "%s:  %s ", uavc_prefix, (denied || !requested) ? "denied" : "granted");
++	uavc_dump_av(tclass, audited);
++	log_append(uavc_audit_buf, " for ");
++
++	/* get any extra information printed by the callback */
++	uavc_suppl_audit(a, tclass, uavc_audit_buf + strlen(uavc_audit_buf),
++			UAVC_AUDIT_BUFSIZE - strlen(uavc_audit_buf));
++
++	log_append(uavc_audit_buf, " ");
++	uavc_dump_query(ssid, tsid, tclass);
++
++	if (denied)
++		log_append(uavc_audit_buf, " permissive=%u", result ? 0 : 1);
++
++	log_append(uavc_audit_buf, "\n");
++	uavc_log(USEC_UAVC, "%s", uavc_audit_buf);
++
++	uavc_release_lock(uavc_log_lock);
++}
++
++
++static void avd_init(struct av_decision *avd)
++{
++	avd->allowed = 0;
++	avd->auditallow = 0;
++	avd->auditdeny = 0xffffffff;
++	avd->seqno = uavc_cache.latest_notif;
++	avd->flags = 0;
++}
++
++int uavc_has_perm_noaudit(security_id_t ssid,
++			 security_id_t tsid,
++			 security_class_t tclass,
++			 access_vector_t requested,
++			 struct uavc_entry_ref *aeref, struct av_decision *avd)
++{
++	struct uavc_entry *ae;
++	int rc = 0;
++	struct uavc_entry entry;
++	access_vector_t denied;
++	struct uavc_entry_ref ref;
++
++	if (avd)
++		avd_init(avd);
++
++	if (!uavc_using_threads && !uavc_app_main_loop) {
++		(void)uavc_netlink_check_nb();
++	}
++
++	if (!aeref) {
++		uavc_entry_ref_init(&ref);
++		aeref = &ref;
++	}
++
++	uavc_get_lock(uavc_lock);
++	uavc_cache_stats_incr(entry_lookups);
++	ae = aeref->ae;
++	if (ae) {
++		if (ae->ssid == ssid &&
++		    ae->tsid == tsid &&
++		    ae->tclass == tclass &&
++		    ((ae->avd.decided & requested) == requested)) {
++			uavc_cache_stats_incr(entry_hits);
++			ae->used = 1;
++		} else {
++			uavc_cache_stats_incr(entry_discards);
++			ae = 0;
++		}
++	}
++
++	if (!ae) {
++		uavc_cache_stats_incr(entry_misses);
++		rc = uavc_lookup(ssid, tsid, tclass, requested, aeref);
++		if (rc) {
++			rc = security_compute_av_flags_raw(ssid->ctx, tsid->ctx,
++							   tclass, requested,
++							   &entry.avd);
++			if (rc && errno == EINVAL && !uavc_enforcing) {
++				rc = errno = 0;
++				goto out;
++			}
++			if (rc)
++				goto out;
++			rc = uavc_insert(ssid, tsid, tclass, &entry, aeref);
++			if (rc)
++				goto out;
++		}
++		ae = aeref->ae;
++	}
++
++	if (avd)
++		memcpy(avd, &ae->avd, sizeof(*avd));
++
++	denied = requested & ~(ae->avd.allowed);
++
++	if (!requested || denied) {
++		if (!uavc_enforcing ||
++		    (ae->avd.flags & USEC_AVD_FLAGS_PERMISSIVE))
++			ae->avd.allowed |= requested;
++		else {
++			errno = EACCES;
++			rc = -1;
++		}
++	}
++
++      out:
++	uavc_release_lock(uavc_lock);
++	return rc;
++}
++
++int uavc_has_perm(security_id_t ssid, security_id_t tsid,
++		 security_class_t tclass, access_vector_t requested,
++		 struct uavc_entry_ref *aeref, void *auditdata)
++{
++	struct av_decision avd;
++	int errsave, rc;
++
++	rc = uavc_has_perm_noaudit(ssid, tsid, tclass, requested, aeref, &avd);
++	errsave = errno;
++	uavc_audit(ssid, tsid, tclass, requested, &avd, rc, auditdata);
++	errno = errsave;
++	return rc;
++}
++
++int uavc_compute_create(security_id_t ssid,  security_id_t tsid,
++		       security_class_t tclass, security_id_t *newsid)
++{
++	int rc;
++	struct uavc_entry_ref aeref;
++	struct uavc_entry entry;
++	char * ctx;
++
++	*newsid = NULL;
++	uavc_entry_ref_init(&aeref);
++
++	uavc_get_lock(uavc_lock);
++
++	/* check for a cached entry */
++	rc = uavc_lookup(ssid, tsid, tclass, 0, &aeref);
++	if (rc) {
++		/* need to make a cache entry for this tuple */
++		rc = security_compute_av_flags_raw(ssid->ctx, tsid->ctx,
++						   tclass, 0, &entry.avd);
++		if (rc)
++			goto out;
++		rc = uavc_insert(ssid, tsid, tclass, &entry, &aeref);
++		if (rc)
++			goto out;
++	}
++
++	/* check for a saved compute_create value */
++	if (!aeref.ae->create_sid) {
++		/* need to query the kernel policy */
++		rc = security_compute_create_raw(ssid->ctx, tsid->ctx, tclass,
++						 &ctx);
++		if (rc)
++			goto out;
++		rc = sidtab_context_to_sid(&uavc_sidtab, ctx, newsid);
++		freecon(ctx);
++		if (rc)
++			goto out;
++
++		aeref.ae->create_sid = *newsid;
++	} else {
++		/* found saved value */
++		*newsid = aeref.ae->create_sid;
++	}
++
++	rc = 0;
++out:
++	uavc_release_lock(uavc_lock);
++	return rc;
++}
++
++int uavc_compute_member(security_id_t ssid,  security_id_t tsid,
++		       security_class_t tclass, security_id_t *newsid)
++{
++	int rc;
++	char * ctx = NULL;
++	*newsid = NULL;
++	/* uavc_init needs to be called before this function */
++	assert(uavc_running);
++	uavc_get_lock(uavc_lock);
++
++	rc = security_compute_member_raw(ssid->ctx, tsid->ctx, tclass, &ctx);
++	if (rc)
++		goto out;
++	rc = sidtab_context_to_sid(&uavc_sidtab, ctx, newsid);
++	freecon(ctx);
++out:
++	uavc_release_lock(uavc_lock);
++	return rc;
++}
++
++int uavc_add_callback(int (*callback) (uint32_t event, security_id_t ssid,
++				      security_id_t tsid,
++				      security_class_t tclass,
++				      access_vector_t perms,
++				      access_vector_t * out_retained),
++		     uint32_t events, security_id_t ssid,
++		     security_id_t tsid,
++		     security_class_t tclass, access_vector_t perms)
++{
++	struct uavc_callback_node *c;
++	int rc = 0;
++
++	c = uavc_malloc(sizeof(*c));
++	if (!c) {
++		rc = -1;
++		goto out;
++	}
++
++	c->callback = callback;
++	c->events = events;
++	c->ssid = ssid;
++	c->tsid = tsid;
++	c->tclass = tclass;
++	c->perms = perms;
++	c->next = uavc_callbacks;
++	uavc_callbacks = c;
++      out:
++	return rc;
++}
++
++static inline int uavc_sidcmp(security_id_t x, security_id_t y)
++{
++	return (x == y || x == SECSID_WILD || y == SECSID_WILD);
++}
++
++static inline void uavc_update_node(uint32_t event, struct uavc_node *node,
++				   access_vector_t perms)
++{
++	switch (event) {
++	case UAVC_CALLBACK_GRANT:
++		node->ae.avd.allowed |= perms;
++		break;
++	case UAVC_CALLBACK_TRY_REVOKE:
++	case UAVC_CALLBACK_REVOKE:
++		node->ae.avd.allowed &= ~perms;
++		break;
++	case UAVC_CALLBACK_AUDITALLOW_ENABLE:
++		node->ae.avd.auditallow |= perms;
++		break;
++	case UAVC_CALLBACK_AUDITALLOW_DISABLE:
++		node->ae.avd.auditallow &= ~perms;
++		break;
++	case UAVC_CALLBACK_AUDITDENY_ENABLE:
++		node->ae.avd.auditdeny |= perms;
++		break;
++	case UAVC_CALLBACK_AUDITDENY_DISABLE:
++		node->ae.avd.auditdeny &= ~perms;
++		break;
++	}
++}
++
++static int uavc_update_cache(uint32_t event, security_id_t ssid,
++			    security_id_t tsid, security_class_t tclass,
++			    access_vector_t perms)
++{
++	struct uavc_node *node;
++	int i;
++
++	uavc_get_lock(uavc_lock);
++
++	if (ssid == SECSID_WILD || tsid == SECSID_WILD) {
++		/* apply to all matching nodes */
++		for (i = 0; i < UAVC_CACHE_SLOTS; i++) {
++			for (node = uavc_cache.slots[i]; node; node = node->next) {
++				if (uavc_sidcmp(ssid, node->ae.ssid) &&
++				    uavc_sidcmp(tsid, node->ae.tsid) &&
++				    tclass == node->ae.tclass) {
++					uavc_update_node(event, node, perms);
++				}
++			}
++		}
++	} else {
++		/* apply to one node */
++		node = uavc_search_node(ssid, tsid, tclass, 0);
++		if (node) {
++			uavc_update_node(event, node, perms);
++		}
++	}
++
++	uavc_release_lock(uavc_lock);
++
++	return 0;
++}
++
++/* uavc_control - update cache and call callbacks
++ *
++ * This should not be called directly; use the individual event
++ * functions instead.
++ */
++static int uavc_control(uint32_t event, security_id_t ssid,
++		       security_id_t tsid, security_class_t tclass,
++		       access_vector_t perms,
++		       uint32_t seqno, access_vector_t * out_retained)
++{
++	struct uavc_callback_node *c;
++	access_vector_t tretained = 0, cretained = 0;
++	int ret, rc = 0, errsave = 0;
++	errno = 0;
++
++	/*
++	 * try_revoke only removes permissions from the cache
++	 * state if they are not retained by the object manager.
++	 * Hence, try_revoke must wait until after the callbacks have
++	 * been invoked to update the cache state.
++	 */
++	if (event != UAVC_CALLBACK_TRY_REVOKE)
++		uavc_update_cache(event, ssid, tsid, tclass, perms);
++
++	for (c = uavc_callbacks; c; c = c->next) {
++		if ((c->events & event) &&
++		    uavc_sidcmp(c->ssid, ssid) &&
++		    uavc_sidcmp(c->tsid, tsid) &&
++		    c->tclass == tclass && (c->perms & perms)) {
++			cretained = 0;
++			ret = c->callback(event, ssid, tsid, tclass,
++					  (c->perms & perms), &cretained);
++			if (ret && !rc) {
++				rc = ret;
++				errsave = errno;
++			}
++			if (!ret)
++				tretained |= cretained;
++		}
++	}
++
++	if (event == UAVC_CALLBACK_TRY_REVOKE) {
++		/* revoke any unretained permissions */
++		perms &= ~tretained;
++		uavc_update_cache(event, ssid, tsid, tclass, perms);
++		*out_retained = tretained;
++	}
++
++	uavc_get_lock(uavc_lock);
++	if (seqno > uavc_cache.latest_notif)
++		uavc_cache.latest_notif = seqno;
++	uavc_release_lock(uavc_lock);
++
++	errno = errsave;
++	return rc;
++}
++
++/**
++ * uavc_ss_grant - Grant previously denied permissions.
++ * @ssid: source security identifier or %SECSID_WILD
++ * @tsid: target security identifier or %SECSID_WILD
++ * @tclass: target security class
++ * @perms: permissions to grant
++ * @seqno: policy sequence number
++ */
++int uavc_ss_grant(security_id_t ssid, security_id_t tsid,
++		 security_class_t tclass, access_vector_t perms,
++		 uint32_t seqno)
++{
++	return uavc_control(UAVC_CALLBACK_GRANT,
++			   ssid, tsid, tclass, perms, seqno, 0);
++}
++
++/**
++ * uavc_ss_try_revoke - Try to revoke previously granted permissions.
++ * @ssid: source security identifier or %SECSID_WILD
++ * @tsid: target security identifier or %SECSID_WILD
++ * @tclass: target security class
++ * @perms: permissions to grant
++ * @seqno: policy sequence number
++ * @out_retained: subset of @perms that are retained
++ *
++ * Try to revoke previously granted permissions, but
++ * only if they are not retained as migrated permissions.
++ * Return the subset of permissions that are retained via @out_retained.
++ */
++int uavc_ss_try_revoke(security_id_t ssid, security_id_t tsid,
++		      security_class_t tclass,
++		      access_vector_t perms, uint32_t seqno,
++		      access_vector_t * out_retained)
++{
++	return uavc_control(UAVC_CALLBACK_TRY_REVOKE,
++			   ssid, tsid, tclass, perms, seqno, out_retained);
++}
++
++/**
++ * uavc_ss_revoke - Revoke previously granted permissions.
++ * @ssid: source security identifier or %SECSID_WILD
++ * @tsid: target security identifier or %SECSID_WILD
++ * @tclass: target security class
++ * @perms: permissions to grant
++ * @seqno: policy sequence number
++ *
++ * Revoke previously granted permissions, even if
++ * they are retained as migrated permissions.
++ */
++int uavc_ss_revoke(security_id_t ssid, security_id_t tsid,
++		  security_class_t tclass, access_vector_t perms,
++		  uint32_t seqno)
++{
++	return uavc_control(UAVC_CALLBACK_REVOKE,
++			   ssid, tsid, tclass, perms, seqno, 0);
++}
++
++/**
++ * uavc_ss_reset - Flush the cache and revalidate migrated permissions.
++ * @seqno: policy sequence number
++ */
++int uavc_ss_reset(uint32_t seqno)
++{
++	int rc;
++
++	rc = uavc_reset();
++
++	uavc_get_lock(uavc_lock);
++	if (seqno > uavc_cache.latest_notif)
++		uavc_cache.latest_notif = seqno;
++	uavc_release_lock(uavc_lock);
++
++	return rc;
++}
++
++/**
++ * uavc_ss_set_auditallow - Enable or disable auditing of granted permissions.
++ * @ssid: source security identifier or %SECSID_WILD
++ * @tsid: target security identifier or %SECSID_WILD
++ * @tclass: target security class
++ * @perms: permissions to grant
++ * @seqno: policy sequence number
++ * @enable: enable flag.
++ */
++int uavc_ss_set_auditallow(security_id_t ssid, security_id_t tsid,
++			  security_class_t tclass, access_vector_t perms,
++			  uint32_t seqno, uint32_t enable)
++{
++	if (enable)
++		return uavc_control(UAVC_CALLBACK_AUDITALLOW_ENABLE,
++				   ssid, tsid, tclass, perms, seqno, 0);
++	else
++		return uavc_control(UAVC_CALLBACK_AUDITALLOW_DISABLE,
++				   ssid, tsid, tclass, perms, seqno, 0);
++}
++
++/**
++ * uavc_ss_set_auditdeny - Enable or disable auditing of denied permissions.
++ * @ssid: source security identifier or %SECSID_WILD
++ * @tsid: target security identifier or %SECSID_WILD
++ * @tclass: target security class
++ * @perms: permissions to grant
++ * @seqno: policy sequence number
++ * @enable: enable flag.
++ */
++int uavc_ss_set_auditdeny(security_id_t ssid, security_id_t tsid,
++			 security_class_t tclass, access_vector_t perms,
++			 uint32_t seqno, uint32_t enable)
++{
++	if (enable)
++		return uavc_control(UAVC_CALLBACK_AUDITDENY_ENABLE,
++				   ssid, tsid, tclass, perms, seqno, 0);
++	else
++		return uavc_control(UAVC_CALLBACK_AUDITDENY_DISABLE,
++				   ssid, tsid, tclass, perms, seqno, 0);
++}
+diff --git a/src/uavc_internal.c b/src/uavc_internal.c
+new file mode 100644
+index 0000000..12f3bd8
+--- /dev/null
++++ b/src/uavc_internal.c
+@@ -0,0 +1,293 @@
++/*
++ * Callbacks for user-supplied memory allocation, supplemental
++ * auditing, and locking routines.
++ *
++ * Author : Eamon Walsh <ewalsh@epoch.ncsc.mil>
++ *
++ * Netlink code derived in part from sample code by
++ * James Morris <jmorris@redhat.com>.
++ */
++
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <string.h>
++#include <poll.h>
++#include <sys/types.h>
++#include <sys/socket.h>
++#include <linux/types.h>
++#include <linux/netlink.h>
++#include "callbacks.h"
++#include "usec_netlink.h"
++#include "uavc_internal.h"
++
++#ifndef NETLINK_USEC
++#define NETLINK_USEC 44
++#endif
++
++/* callback pointers */
++void *(*uavc_func_malloc) (size_t) = NULL;
++void (*uavc_func_free) (void *) = NULL;
++
++void (*uavc_func_log) (const char *, ...) = NULL;
++void (*uavc_func_audit) (void *, security_class_t, char *, size_t) = NULL;
++
++int uavc_using_threads = 0;
++int uavc_app_main_loop = 0;
++void *(*uavc_func_create_thread) (void (*)(void)) = NULL;
++void (*uavc_func_stop_thread) (void *) = NULL;
++
++void *(*uavc_func_alloc_lock) (void) = NULL;
++void (*uavc_func_get_lock) (void *) = NULL;
++void (*uavc_func_release_lock) (void *) = NULL;
++void (*uavc_func_free_lock) (void *) = NULL;
++
++/* message prefix string and uavc enforcing mode */
++char uavc_prefix[UAVC_PREFIX_SIZE] = "uuavc";
++int uavc_running = 0;
++int uavc_enforcing = 1;
++int uavc_setenforce = 0;
++int uavc_netlink_trouble = 0;
++
++/* netlink socket code */
++static int fd = -1;
++
++int uavc_netlink_open(int blocking)
++{
++	int len, rc = 0;
++	struct sockaddr_nl addr;
++
++	fd = socket(PF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_USEC);
++	if (fd < 0) {
++		rc = fd;
++		goto out;
++	}
++	
++	if (!blocking && fcntl(fd, F_SETFL, O_NONBLOCK)) {
++		close(fd);
++		fd = -1;
++		rc = -1;
++		goto out;
++	}
++
++	len = sizeof(addr);
++
++	memset(&addr, 0, len);
++	addr.nl_family = AF_NETLINK;
++	addr.nl_groups = USECNL_GRP_UAVC;
++
++	if (bind(fd, (struct sockaddr *)&addr, len) < 0) {
++		close(fd);
++		fd = -1;
++		rc = -1;
++		goto out;
++	}
++      out:
++	return rc;
++}
++
++void uavc_netlink_close(void)
++{
++	if (fd >= 0)
++		close(fd);
++	fd = -1;
++}
++
++static int uavc_netlink_receive(void *buf, unsigned buflen, int blocking)
++{
++	int rc;
++	struct pollfd pfd = { fd, POLLIN | POLLPRI, 0 };
++	struct sockaddr_nl nladdr;
++	socklen_t nladdrlen = sizeof nladdr;
++	struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
++
++	do {
++		rc = poll(&pfd, 1, (blocking ? -1 : 0));
++	} while (rc < 0 && errno == EINTR);
++
++	if (rc == 0 && !blocking) {
++		errno = EWOULDBLOCK;
++		return -1;
++	}
++	else if (rc < 1) {
++		uavc_log(SELINUX_ERROR, "%s:  netlink poll: error %d\n",
++			uavc_prefix, errno);
++		return rc;
++	}
++
++	rc = recvfrom(fd, buf, buflen, 0, (struct sockaddr *)&nladdr,
++		      &nladdrlen);
++	if (rc < 0)
++		return rc;
++
++	if (nladdrlen != sizeof nladdr) {
++		uavc_log(SELINUX_WARNING,
++			"%s:  warning: netlink address truncated, len %u?\n",
++			uavc_prefix, nladdrlen);
++		return -1;
++	}
++
++	if (nladdr.nl_pid) {
++		uavc_log(SELINUX_WARNING,
++			"%s:  warning: received spoofed netlink packet from: %u\n",
++			uavc_prefix, nladdr.nl_pid);
++		return -1;
++	}
++
++	if (rc == 0) {
++		uavc_log(SELINUX_WARNING,
++			"%s:  warning: received EOF on netlink socket\n",
++			uavc_prefix);
++		errno = EBADFD;
++		return -1;
++	}
++
++	if (nlh->nlmsg_flags & MSG_TRUNC || nlh->nlmsg_len > (unsigned)rc) {
++		uavc_log(SELINUX_WARNING,
++			"%s:  warning: incomplete netlink message\n",
++			uavc_prefix);
++		return -1;
++	}
++
++	return 0;
++}
++
++static int uavc_netlink_process(void *buf)
++{
++	int rc;
++	struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
++
++	switch (nlh->nlmsg_type) {
++	case NLMSG_ERROR:{
++		struct nlmsgerr *err = NLMSG_DATA(nlh);
++
++		/* Netlink ack */
++		if (err->error == 0)
++			break;
++
++		errno = -err->error;
++		uavc_log(SELINUX_ERROR,
++			"%s:  netlink error: %d\n", uavc_prefix, errno);
++		return -1;
++	}
++
++	case USECNL_MSG_SETENFORCE:{
++		struct usecnl_msg_setenforce *msg = NLMSG_DATA(nlh);
++		msg->val = !!msg->val;
++		uavc_log(SELINUX_INFO,
++			"%s:  received setenforce notice (enforcing=%d)\n",
++			uavc_prefix, msg->val);
++		if (uavc_setenforce)
++			break;
++		uavc_enforcing = msg->val;
++		if (uavc_enforcing && (rc = uavc_ss_reset(0)) < 0) {
++			uavc_log(SELINUX_ERROR,
++				"%s:  cache reset returned %d (errno %d)\n",
++				uavc_prefix, rc, errno);
++			return rc;
++		}
++		rc = selinux_netlink_setenforce(msg->val);
++		if (rc < 0)
++			return rc;
++		break;
++	}
++
++	case USECNL_MSG_POLICYLOAD:{
++		struct usecnl_msg_policyload *msg = NLMSG_DATA(nlh);
++		uavc_log(SELINUX_INFO,
++			"%s:  received policyload notice (seqno=%u)\n",
++			uavc_prefix, msg->seqno);
++		rc = uavc_ss_reset(msg->seqno);
++		if (rc < 0) {
++			uavc_log(SELINUX_ERROR,
++				"%s:  cache reset returned %d (errno %d)\n",
++				uavc_prefix, rc, errno);
++			return rc;
++		}
++		rc = selinux_netlink_policyload(msg->seqno);
++		if (rc < 0)
++			return rc;
++		break;
++	}
++
++	default:
++		uavc_log(SELINUX_WARNING,
++			"%s:  warning: unknown netlink message %d\n",
++			uavc_prefix, nlh->nlmsg_type);
++	}
++	return 0;
++}
++
++int uavc_netlink_check_nb(void)
++{
++	int rc;
++	char buf[1024] __attribute__ ((aligned));
++
++	while (1) {
++		errno = 0;
++		rc = uavc_netlink_receive(buf, sizeof(buf), 0);
++		if (rc < 0) {
++			if (errno == EWOULDBLOCK)
++				return 0;
++			if (errno == 0 || errno == EINTR)
++				continue;
++			else {
++				uavc_log(SELINUX_ERROR,
++					"%s:  netlink recvfrom: error %d\n",
++					uavc_prefix, errno);
++				return rc;
++			}
++		}
++
++		(void)uavc_netlink_process(buf);
++	}
++	return 0;
++}
++
++/* run routine for the netlink listening thread */
++void uavc_netlink_loop(void)
++{
++	int rc;
++	char buf[1024] __attribute__ ((aligned));
++
++	while (1) {
++		errno = 0;
++		rc = uavc_netlink_receive(buf, sizeof(buf), 1);
++		if (rc < 0) {
++			if (errno == 0 || errno == EINTR)
++				continue;
++			else {
++				uavc_log(SELINUX_ERROR,
++					"%s:  netlink recvfrom: error %d\n",
++					uavc_prefix, errno);
++				break;
++			}
++		}
++
++		rc = uavc_netlink_process(buf);
++		if (rc < 0)
++			break;
++	}
++
++	close(fd);
++	fd = -1;
++	uavc_netlink_trouble = 1;
++	uavc_log(SELINUX_ERROR,
++		"%s:  netlink thread: errors encountered, terminating\n",
++		uavc_prefix);
++}
++
++int uavc_netlink_acquire_fd(void)
++{
++    uavc_app_main_loop = 1;
++
++    return fd;
++}
++
++void uavc_netlink_release_fd(void)
++{
++    uavc_app_main_loop = 0;
++}
+diff --git a/src/uavc_internal.h b/src/uavc_internal.h
+new file mode 100644
+index 0000000..e1cab78
+--- /dev/null
++++ b/src/uavc_internal.h
+@@ -0,0 +1,176 @@
++/*
++ * This file describes the internal interface used by the UAVC
++ * for calling the user-supplied memory allocation, supplemental
++ * auditing, and locking routine, as well as incrementing the
++ * statistics fields.
++ *
++ * Author : Eamon Walsh <ewalsh@epoch.ncsc.mil>
++ */
++#ifndef _SELINUX_UAVC_INTERNAL_H_
++#define _SELINUX_UAVC_INTERNAL_H_
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <selinux/uavc.h>
++#include "callbacks.h"
++
++/* callback pointers */
++extern void *(*uavc_func_malloc) (size_t) ;
++extern void (*uavc_func_free) (void *);
++
++extern void (*uavc_func_log) (const char *, ...) __attribute__((__format__(printf,1,2))) ;
++extern void (*uavc_func_audit) (void *, security_class_t, char *, size_t);
++
++extern int uavc_using_threads ;
++extern int uavc_app_main_loop ;
++extern void *(*uavc_func_create_thread) (void (*)(void));
++extern void (*uavc_func_stop_thread) (void *);
++
++extern void *(*uavc_func_alloc_lock) (void);
++extern void (*uavc_func_get_lock) (void *);
++extern void (*uavc_func_release_lock) (void *);
++extern void (*uavc_func_free_lock) (void *);
++
++static inline void set_callbacks(const struct uavc_memory_callback *mem_cb,
++				 const struct uavc_log_callback *log_cb,
++				 const struct uavc_thread_callback *thread_cb,
++				 const struct uavc_lock_callback *lock_cb)
++{
++	if (mem_cb) {
++		uavc_func_malloc = mem_cb->func_malloc;
++		uavc_func_free = mem_cb->func_free;
++	}
++	if (log_cb) {
++		uavc_func_log = log_cb->func_log;
++		uavc_func_audit = log_cb->func_audit;
++	}
++	if (thread_cb) {
++		uavc_using_threads = 1;
++		uavc_func_create_thread = thread_cb->func_create_thread;
++		uavc_func_stop_thread = thread_cb->func_stop_thread;
++	}
++	if (lock_cb) {
++		uavc_func_alloc_lock = lock_cb->func_alloc_lock;
++		uavc_func_get_lock = lock_cb->func_get_lock;
++		uavc_func_release_lock = lock_cb->func_release_lock;
++		uavc_func_free_lock = lock_cb->func_free_lock;
++	}
++}
++
++/* message prefix and enforcing mode*/
++#define UAVC_PREFIX_SIZE 16
++extern char uavc_prefix[UAVC_PREFIX_SIZE] ;
++extern int uavc_running ;
++extern int uavc_enforcing ;
++extern int uavc_setenforce ;
++
++/* user-supplied callback interface for uavc */
++static inline void *uavc_malloc(size_t size)
++{
++	return uavc_func_malloc ? uavc_func_malloc(size) : malloc(size);
++}
++
++static inline void uavc_free(void *ptr)
++{
++	if (uavc_func_free)
++		uavc_func_free(ptr);
++	else
++		free(ptr);
++}
++
++/* this is a macro in order to use the variadic capability. */
++#define uavc_log(type, format...) \
++  if (uavc_func_log) \
++    uavc_func_log(format); \
++  else \
++    selinux_log(type, format);
++
++static inline void uavc_suppl_audit(void *ptr, security_class_t class,
++				   char *buf, size_t len)
++{
++	if (uavc_func_audit)
++		uavc_func_audit(ptr, class, buf, len);
++	else
++		selinux_audit(ptr, class, buf, len);
++}
++
++static inline void *uavc_create_thread(void (*run) (void))
++{
++	return uavc_func_create_thread ? uavc_func_create_thread(run) : NULL;
++}
++
++static inline void uavc_stop_thread(void *thread)
++{
++	if (uavc_func_stop_thread)
++		uavc_func_stop_thread(thread);
++}
++
++static inline void *uavc_alloc_lock(void)
++{
++	return uavc_func_alloc_lock ? uavc_func_alloc_lock() : NULL;
++}
++
++static inline void uavc_get_lock(void *lock)
++{
++	if (uavc_func_get_lock)
++		uavc_func_get_lock(lock);
++}
++
++static inline void uavc_release_lock(void *lock)
++{
++	if (uavc_func_release_lock)
++		uavc_func_release_lock(lock);
++}
++
++static inline void uavc_free_lock(void *lock)
++{
++	if (uavc_func_free_lock)
++		uavc_func_free_lock(lock);
++}
++
++/* statistics helper routines */
++#ifdef UAVC_CACHE_STATS
++
++#define uavc_cache_stats_incr(field) \
++  cache_stats.field ++;
++#define uavc_cache_stats_add(field, num) \
++  cache_stats.field += num;
++
++#else
++
++#define uavc_cache_stats_incr(field)
++#define uavc_cache_stats_add(field, num)
++
++#endif
++
++/* logging helper routines */
++#define UAVC_AUDIT_BUFSIZE 1024
++
++/* again, we need the variadic capability here */
++#define log_append(buf,format...) \
++  snprintf(buf+strlen(buf), UAVC_AUDIT_BUFSIZE-strlen(buf), format)
++
++/* internal callbacks */
++int uavc_ss_grant(security_id_t ssid, security_id_t tsid,
++		 security_class_t tclass, access_vector_t perms,
++		 uint32_t seqno) ;
++int uavc_ss_try_revoke(security_id_t ssid, security_id_t tsid,
++		      security_class_t tclass,
++		      access_vector_t perms, uint32_t seqno,
++		      access_vector_t * out_retained) ;
++int uavc_ss_revoke(security_id_t ssid, security_id_t tsid,
++		  security_class_t tclass, access_vector_t perms,
++		  uint32_t seqno) ;
++int uavc_ss_reset(uint32_t seqno) ;
++int uavc_ss_set_auditallow(security_id_t ssid, security_id_t tsid,
++			  security_class_t tclass, access_vector_t perms,
++			  uint32_t seqno, uint32_t enable) ;
++int uavc_ss_set_auditdeny(security_id_t ssid, security_id_t tsid,
++			 security_class_t tclass, access_vector_t perms,
++			 uint32_t seqno, uint32_t enable) ;
++
++/* netlink kernel message code */
++extern int uavc_netlink_trouble ;
++
++#endif				/* _SELINUX_UAVC_INTERNAL_H_ */
+diff --git a/src/usec_config.c b/src/usec_config.c
+new file mode 100644
+index 0000000..51df51d
+--- /dev/null
++++ b/src/usec_config.c
+@@ -0,0 +1,55 @@
++#include <stdio.h>
++#include <stdio_ext.h>
++#include <string.h>
++#include <ctype.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <limits.h>
++#include <unistd.h>
++#include "usec_internal.h"
++
++#define USECLINUXTAG "USECLINUX="
++
++int usec_getenforcemode(int *enforce)
++{
++	int ret = -1;
++	FILE *cfg = fopen(USECLINUXCONFIG, "re");
++	if (cfg) {
++		char *buf;
++		int len = sizeof(USECLINUXTAG) - 1;
++		buf = malloc(selinux_page_size);
++		if (!buf) {
++			fclose(cfg);
++			return -1;
++		}
++		while (fgets_unlocked(buf, selinux_page_size, cfg)) {
++			if (strncmp(buf, USECLINUXTAG, len))
++				continue;
++			if (!strncasecmp
++			    (buf + len, "enforcing", sizeof("enforcing") - 1)) {
++				*enforce = 1;
++				ret = 0;
++				break;
++			} else
++			    if (!strncasecmp
++				(buf + len, "permissive",
++				 sizeof("permissive") - 1)) {
++				*enforce = 0;
++				ret = 0;
++				break;
++			} else
++			    if (!strncasecmp
++				(buf + len, "disabled",
++				 sizeof("disabled") - 1)) {
++				*enforce = -1;
++				ret = 0;
++				break;
++			}
++		}
++		fclose(cfg);
++		free(buf);
++	}
++	return ret;
++}
++
+diff --git a/src/usec_internal.h b/src/usec_internal.h
+new file mode 100644
+index 0000000..b8a2589
+--- /dev/null
++++ b/src/usec_internal.h
+@@ -0,0 +1,7 @@
++#include "selinux_internal.h"
++#include <selinux/usec.h>
++
++
++#define USECLINUXCONFIG SELINUXDIR "usecconfig"
++
++extern int has_usec_config;
+diff --git a/src/usec_netlink.h b/src/usec_netlink.h
+new file mode 100644
+index 0000000..614bdd8
+--- /dev/null
++++ b/src/usec_netlink.h
+@@ -0,0 +1,51 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++/*
++ * Netlink event notifications for SELinux.
++ *
++ * Author: James Morris <jmorris@redhat.com>
++ *
++ * Copyright (C) 2004 Red Hat, Inc., James Morris <jmorris@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2,
++ * as published by the Free Software Foundation.
++ */
++#ifndef _LINUX_USEC_NETLINK_H
++#define _LINUX_USEC_NETLINK_H
++
++#include <linux/types.h>
++
++/* Message types. */
++#define USECNL_MSG_BASE 0x10
++enum {
++	USECNL_MSG_SETENFORCE = USECNL_MSG_BASE,
++	USECNL_MSG_POLICYLOAD,
++	USECNL_MSG_MAX
++};
++
++#ifndef __KERNEL__
++/* Multicast groups - backwards compatiblility for userspace */
++#define USECNL_GRP_NONE		0x00000000
++#define USECNL_GRP_UAVC		0x00000001	/* USEC AVC notifications */
++#define USECNL_GRP_ALL		0xffffffff
++#endif
++
++enum usec_nlgroups {
++	USECNLGRP_NONE,
++#define USECNLGRP_NONE	USECNLGRP_NONE
++	USECNLGRP_UAVC,
++#define USECNLGRP_UAVC	USECNLGRP_UAVC
++	__USECNLGRP_MAX
++};
++#define USECNLGRP_MAX	(__USECNLGRP_MAX - 1)
++
++/* Message structures */
++struct usecnl_msg_setenforce {
++	__s32		val;
++};
++
++struct usecnl_msg_policyload {
++	__u32	seqno;
++};
++
++#endif /* _LINUX_USEC_NETLINK_H */
+diff --git a/utils/getfileaudit.c b/utils/getfileaudit.c
+new file mode 100644
+index 0000000..a30bb64
+--- /dev/null
++++ b/utils/getfileaudit.c
+@@ -0,0 +1,46 @@
++#include <unistd.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <limits.h>
++#include <selinux/selinux.h>
++
++
++static __attribute__ ((__noreturn__)) void usage(const char *progname)
++{
++	fprintf(stderr,
++		"usage:  %s  [file]\n\n",progname);
++	exit(1);
++}
++
++
++int main(int argc __attribute__ ((unused)),
++	 char **argv __attribute__ ((unused)))
++{
++	int rc;
++    char file_abs[PATH_MAX] = {0};
++
++    if (argc < 2)
++	    usage(argv[0]);
++
++    rc = is_selinux_enabled_raw();
++    if (rc < 0) {
++        fputs("getfileaufit:  selinux_mnt is NULL", stderr);
++        return 2;
++    }
++
++    realpath(argv[1], file_abs);
++    if (rc == 1)
++    {
++        rc = get_file_audit_status(file_abs);
++		if (rc == -1) {
++			puts("don't need audit");
++			return 0;
++		}
++        puts("need audit");
++    }
++    else
++    {
++        puts("selinux disabled");
++    }
++    return 0;
++}
+-- 
+2.20.1
+
